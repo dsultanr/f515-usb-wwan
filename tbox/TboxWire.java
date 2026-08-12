@@ -738,7 +738,8 @@ public final class TboxWire {
     //
     // HiLink-модем — сам себе роутер, и он же сам себе веб-морда. Цифры, которые она
     // показывает, доступны без авторизации обычным GET'ом на шлюз:
-    //   Huawei: /api/monitor/status — XML, <SignalIcon>0..5</SignalIcon> и
+    //   Huawei: /api/monitoring/status (на части прошивок /api/monitor/status) —
+    //           XML, <SignalIcon>0..5</SignalIcon> и
     //           <CurrentNetworkType>19</CurrentNetworkType> (19 = LTE);
     //   ZTE:    /goform/goform_get_cmd_process?multi_data=1&cmd=signalbar,network_type —
     //           JSON, но только с заголовком Referer на сам модем, иначе 403/пусто.
@@ -765,10 +766,31 @@ public final class TboxWire {
                 "линк " + iface + ", веб-API модема на " + gw + " не ответило");
     }
 
+    /**
+     * Статус у Huawei лежит по одному из двух путей — какой именно, зависит от
+     * прошивки, и по вендору это не угадать. Web-ui самих модемов зовёт
+     * /api/monitoring/status; на E8278 (21.261.67.00.778) короткий
+     * /api/monitor/status отвечает ошибкой 100002 "no support", то есть одного
+     * пути мало. Пробуем по очереди, первый ответивший и есть наш.
+     */
+    static final String[] HUAWEI_STATUS = {
+            "/api/monitoring/status",
+            "/api/monitor/status",
+    };
+
     /** @return null, если это не Huawei-API (тогда пробуем следующий). */
     static Sig pollHuawei(String gw, String iface) {
-        String body = httpGet("http://" + gw + "/api/monitor/status", gw);
-        if (body == null || body.indexOf("SignalIcon") < 0) return null;
+        String body = null;
+        String path = null;
+        for (int i = 0; i < HUAWEI_STATUS.length; i++) {
+            String b = httpGet("http://" + gw + HUAWEI_STATUS[i], gw);
+            if (b != null && b.indexOf("SignalIcon") >= 0) {
+                body = b;
+                path = HUAWEI_STATUS[i];
+                break;
+            }
+        }
+        if (body == null) return null;
         int bars = intOr(xmlTag(body, "SignalIcon"), -1);
         int netType = intOr(xmlTag(body, "CurrentNetworkType"), -1);
         String gen = huaweiGeneration(netType);
@@ -776,7 +798,7 @@ public final class TboxWire {
         if (bars < 0) return new Sig(genToReg(gen), STRENGTH_WHEN_UNKNOWN,
                 "линк " + iface + ", Huawei API без SignalIcon, " + rat);
         return new Sig(bars > 0 ? genToReg(gen) : REG_NONE, clampBars(bars),
-                "линк " + iface + ", Huawei API " + gw + ": " + bars + "/5, " + rat, true);
+                "линк " + iface + ", Huawei API " + gw + path + ": " + bars + "/5, " + rat, true);
     }
 
     /** @return null, если это не ZTE-API. */
@@ -913,8 +935,10 @@ public final class TboxWire {
             String gw = gwOverride != null ? gwOverride : gatewayFor(iface);
             say("шлюз модема: " + gw);
             if (gw != null) {
-                String h = httpGet("http://" + gw + "/api/monitor/status", gw);
-                say("Huawei /api/monitor/status: " + (h == null ? "нет ответа" : h));
+                for (int i = 0; i < HUAWEI_STATUS.length; i++) {
+                    String h = httpGet("http://" + gw + HUAWEI_STATUS[i], gw);
+                    say("Huawei " + HUAWEI_STATUS[i] + ": " + (h == null ? "нет ответа" : h));
+                }
                 String z = httpGet("http://" + gw
                         + "/goform/goform_get_cmd_process?multi_data=1&cmd=signalbar,network_type,rssi,rsrp,ppp_status", gw);
                 say("ZTE /goform/...: " + (z == null ? "нет ответа" : z));
