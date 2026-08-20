@@ -423,7 +423,7 @@ wifi_priority() {
 # правь и там.
 is_storage_pid() {
 	case "$1" in
-	14fe | 1f01 | 1f02 | 1446 | 14ad | 1c0b) return 0 ;;
+	14fe | 1f01 | 1f02 | 1446 | 14ad | 1c0b | 1c1b) return 0 ;;
 	esac
 	return 1
 }
@@ -1167,8 +1167,12 @@ if [ "$MODE" = ppp ]; then
 		[ -c /dev/ttyUSB0 ] || die "порты ttyUSB не появились" \
 			"смотри dmesg: привязался ли option к интерфейсам $(basename "$USB_DEV"):1.*"
 
-		MODEM_TTY=$(port_for_proto 10) || MODEM_TTY=/dev/ttyUSB0
-		CTRL_TTY=$(port_for_proto 12)  || CTRL_TTY=/dev/ttyUSB1
+		# У части прошивок Huawei своя нумерация вместо 10/12: 61 = 4G MODEM,
+		# 62 = 4G PCUI, 76 = NCM (E3272, AT^SETPORT=? это подтверждает).
+		MODEM_TTY=$(port_for_proto 10) || MODEM_TTY=$(port_for_proto 61) ||
+			MODEM_TTY=/dev/ttyUSB0
+		CTRL_TTY=$(port_for_proto 12) || CTRL_TTY=$(port_for_proto 62) ||
+			CTRL_TTY=/dev/ttyUSB1
 		[ -c "$CTRL_TTY" ] || CTRL_TTY=$MODEM_TTY
 		ok "модемный порт $MODEM_TTY, управляющий $CTRL_TTY (предположительно)"
 		ok "привязано интерфейсов: $(ls -d "$USB_DEV":*/ttyUSB* 2>/dev/null | wc -l)"
