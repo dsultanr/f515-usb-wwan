@@ -760,7 +760,12 @@ public final class TboxWire {
      * значения руками, если однажды дойдут руки: `tbox-icon.sh fake 4 --reg N`.
      */
     static int genToReg(String gen) {
+        if (gen == null) return REG_STATUS_REGISTERED;
         if ("нет сети".equals(gen)) return REG_NONE;
+        if ("5G".equalsIgnoreCase(gen)) return REG_5G;
+        if ("4G".equalsIgnoreCase(gen)) return REG_4G;
+        if ("3G".equalsIgnoreCase(gen)) return REG_3G;
+        if ("2G".equalsIgnoreCase(gen)) return REG_2G;
         return REG_STATUS_REGISTERED;
     }
 
