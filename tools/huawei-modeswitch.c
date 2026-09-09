@@ -63,7 +63,7 @@
 #define SYSFS_STORAGE_UNBIND "/sys/bus/usb/drivers/usb-storage/unbind"
 
 /* PID'ы, в которых модем притворяется флешкой/CD-ROM и AT-портов не отдаёт. */
-static const uint16_t storage_pids[] = { 0x14fe, 0x1f01, 0x1f02, 0x1446, 0x14ad, 0x1c0b };
+static const uint16_t storage_pids[] = { 0x14fe, 0x1f01, 0x1f02, 0x1446, 0x14ad, 0x1c0b, 0x1c1b };
 
 /*
  * Способы переключения, по порядку. Все три — стандартный CBW: signature "USBC",
