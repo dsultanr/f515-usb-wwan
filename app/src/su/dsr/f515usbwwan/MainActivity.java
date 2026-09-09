@@ -58,6 +58,7 @@ public class MainActivity extends Activity {
         addSmsButton();
         addIconButton();
         addDnsButton();
+        addVpnButton();
         addUrlButton("Интернетометр", SPEEDTEST_URL);
         addFormatButton();
         HorizontalScrollView buttonsScroll = new HorizontalScrollView(this);
@@ -82,6 +83,7 @@ public class MainActivity extends Activity {
         append("Включить      - поднять модем и раздать интернет приложениям Android");
         append("Выключить     - остановить pppd");
         append("Автозапуск    - подъём после перезагрузки головы + слежение за связью");
+        append("VPN           - совместимость с VPN-клиентами (VpnService)");
         append("Интернетометр - открыть " + SPEEDTEST_URL + " (проверка интернета глазами)");
         append("автозапуск сейчас: " + (Autostart.isEnabled(this) ? "ВКЛЮЧЕН" : "выключен"));
 
@@ -481,6 +483,31 @@ public class MainActivity extends Activity {
         }));
     }
 
+    private void addVpnButton() {
+        buttonsRow.addView(button("VPN", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (busy) return;
+                setBusy(true);
+                append("");
+                append("> VPN: читаю состояние...");
+                background(new Runnable() {
+                    @Override
+                    public void run() {
+                        final String out = Keeper.run(MainActivity.this, "--vpn-status", null);
+                        ui.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                setBusy(false);
+                                showVpnDialog(out);
+                            }
+                        });
+                    }
+                });
+            }
+        }));
+    }
+
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
         MenuItem item = menu.add(0, 1001, 0, "Обновить");
@@ -702,6 +729,60 @@ public class MainActivity extends Activity {
             @Override
             public void run(Keeper.Progress p) {
                 Keeper.run(MainActivity.this, "--dns=" + value, p);
+            }
+        });
+    }
+
+    /**
+     * Совместимость с VPN-клиентами на VpnService (HAPP, WireGuard, v2rayNG и др.).
+     * Сдвигает вендорский default в таблице main ниже правил netd.
+     */
+    private void showVpnDialog(String status) {
+        final boolean modeOn = value(status, "vpn_mode").equals("1");
+        final boolean moved = value(status, "vpn_moved").equals("1");
+        String tun = value(status, "vpn_tun");
+
+        StringBuilder msg = new StringBuilder();
+        msg.append("Совместимость с VPN-клиентами на VpnService (HAPP, WireGuard, v2rayNG и др.).\n\n")
+                .append("Штатное вендорское правило маршрутизации перехватывает трафик до правил Android netd, ")
+                .append("из-за чего приложения идут мимо VPN-туннеля. Этот режим сдвигает default в main ниже правил netd.\n\n");
+
+        msg.append("Настройка: ").append(modeOn ? "ВКЛЮЧЕНО" : "выключено").append('\n');
+        msg.append("Правила в ядре: ").append(moved ? "перенесены (совместимы с VPN)" : "штатные вендорские").append('\n');
+        if (!tun.isEmpty()) {
+            msg.append("Активный туннель: ").append(tun).append('\n');
+        }
+        msg.append("\nНастройка сохраняется и применяется при каждом подъёме модема.");
+
+        AlertDialog.Builder b = new AlertDialog.Builder(this)
+                .setTitle("Совместимость с VPN")
+                .setMessage(msg.toString());
+
+        if (modeOn || moved) {
+            b.setNegativeButton("Выключить", new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface d, int which) {
+                    applyVpn(false);
+                }
+            });
+        } else {
+            b.setPositiveButton("Включить", new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface d, int which) {
+                    applyVpn(true);
+                }
+            });
+        }
+        b.setNeutralButton("Отмена", null);
+        b.show();
+    }
+
+    private void applyVpn(final boolean enable) {
+        final String arg = enable ? "--vpn=on" : "--vpn=off";
+        runInBackground("> VPN: " + (enable ? "включаю" : "выключаю") + "...", new Job() {
+            @Override
+            public void run(Keeper.Progress p) {
+                Keeper.run(MainActivity.this, arg, p);
             }
         });
     }

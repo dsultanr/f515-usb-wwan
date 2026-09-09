@@ -29,6 +29,7 @@
 #   wwan-up.sh --vpn        подвинуть вендорское «from all lookup main» ниже правил
 #                           netd, чтобы работали VPN-клиенты на VpnService
 #   wwan-up.sh --vpn=off    вернуть правила вендора как было
+#   wwan-up.sh --vpn-status показать текущее состояние режима VPN
 #
 # Настройки: переменные окружения или /data/local/tmp/wwan.conf (см. wwan.conf.example).
 
@@ -81,7 +82,10 @@ CHECK_HOST=${WWAN_CHECK_HOST:-77.88.8.8}
 # Совместимость с VPN-клиентами на VpnService (HAPP, v2rayNG, WireGuard и пр.).
 # Выключено по умолчанию: режим трогает правила вендора, а не только свои.
 # Зачем это нужно и что именно двигается — см. vpn_rules_apply и docs/app-network.md.
-VPN_MODE=${WWAN_VPN:-0}
+VPN_SETTING=$STATE/vpn
+VPN_WANT=${WWAN_VPN:-}
+[ -n "$VPN_WANT" ] || VPN_WANT=$(cat "$VPN_SETTING" 2>/dev/null)
+VPN_MODE=${VPN_WANT:-0}
 # Новое место вендорского catch-all'а. Ниже всех правил netd, которые нас
 # волнуют (VPN 13000/21000, default network 23000), но выше unreachable (32000):
 # так main остаётся последним резервом для трафика, которому netd не нашёл сети,
@@ -100,6 +104,8 @@ DO_DNS=0
 DNS_SET=0
 DO_RECONNECT=0
 DO_VPN=0
+VPN_SET=0
+VPN_STATUS_ONLY=0
 for a in "$@"; do
 	case "$a" in
 	-c | --check)     CHECK_ONLY=1 ;;
@@ -113,9 +119,10 @@ for a in "$@"; do
 	# назвал адрес явно, спорить с ним нечему.
 	--dns=*)          DO_DNS=1; DNS_SET=1; DNS_WANT=${a#--dns=} ;;
 	# Явный ключ главнее wwan.conf: человек только что сказал, чего хочет.
-	--vpn | --vpn=on) VPN_MODE=1; DO_VPN=1 ;;
-	--vpn=off)        VPN_MODE=0; DO_VPN=1 ;;
-	-h | --help)      sed -n '2,33p' "$0"; exit 0 ;;
+	--vpn-status | --vpn=status) DO_VPN=1; VPN_STATUS_ONLY=1 ;;
+	--vpn | --vpn=on) VPN_MODE=1; DO_VPN=1; VPN_SET=1 ;;
+	--vpn=off)        VPN_MODE=0; DO_VPN=1; VPN_SET=1 ;;
+	-h | --help)      sed -n '2,34p' "$0"; exit 0 ;;
 	*) echo "неизвестный аргумент: $a (см. --help)"; exit 64 ;;
 	esac
 done
@@ -1076,18 +1083,51 @@ fi
 # сам по себе (починить VPN на уже поднятой связи), и чтобы откатиться, ничего
 # не роняя. С --system сюда не заходим — там перенос делается своей стадией.
 if [ "$DO_VPN" = 1 ] && [ "$DO_SYSTEM" = 0 ]; then
+	if [ "$VPN_STATUS_ONLY" = 1 ]; then
+		_vs_moved=$(vpn_rules_moved ip && echo 1 || echo 0)
+		_vs_tun=$(vpn_tun_iface)
+		say "режим VPN: $VPN_MODE"
+		say "правила в ядре: $([ "$_vs_moved" = 1 ] && echo 'перенесены' || echo 'штатные вендорские')"
+		[ -n "$_vs_tun" ] && say "туннель: $_vs_tun"
+		echo "vpn_mode=$VPN_MODE"
+		echo "vpn_moved=$_vs_moved"
+		echo "vpn_tun=${_vs_tun:-}"
+		exit 0
+	fi
+
 	stage "правила маршрутизации для VPN"
+	if [ "$VPN_SET" = 1 ]; then
+		mkdir -p "$STATE" 2>/dev/null
+		echo "$VPN_MODE" >"$VPN_SETTING" || die "не смог записать $VPN_SETTING" "проверь права на $STATE"
+	fi
+
 	if [ "$VPN_MODE" = 1 ]; then
 		vpn_rules_apply ip IPv4 || exit 1
 		[ -n "$(vpn_vendor_prefs 'ip -6')" ] && vpn_rules_apply 'ip -6' IPv6
+		WAN_IF=$(cat "$STATE/wan-iface" 2>/dev/null)
+		if [ -n "$WAN_IF" ]; then
+			tbox_net
+			if [ -n "$TB_SRC" ]; then
+				ip route show table "$TB_IF" 2>/dev/null | grep '^default' |
+					grep -v " dev $WAN_IF " |
+					while read -r _tb_dead; do
+						warn "снимаю мёртвый маршрут: $_tb_dead"
+						# shellcheck disable=SC2086
+						do_it ip route del $_tb_dead table "$TB_IF" 2>/dev/null || true
+					done
+				add_default "$TB_IF" 5
+				iptables -w 10 -t nat -C POSTROUTING -s "$TB_SRC" -o tun+ -j MASQUERADE 2>/dev/null ||
+					do_it iptables -w 10 -t nat -A POSTROUTING -s "$TB_SRC" -o tun+ -j MASQUERADE
+			fi
+		fi
 		say ""
-		say "Правила живут до перезагрузки. Чтобы применялось само —"
-		say "допиши WWAN_VPN=1 в $CONF."
-		say "Таблицу сети приложений это НЕ трогает: если интернет им сейчас даёт"
-		say "модем, прогони ещё раз wwan-up.sh --system."
+		say "Настройка сохранена ($VPN_SETTING) и будет применяться при каждом подъёме."
+		say "В wwan.conf можно задать принудительно: WWAN_VPN=1."
 	else
 		vpn_rules_restore ip IPv4
 		vpn_rules_restore 'ip -6' IPv6
+		say ""
+		say "Настройка сохранена: режим VPN выключен."
 	fi
 	exit 0
 fi
