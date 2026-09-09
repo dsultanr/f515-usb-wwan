@@ -26,7 +26,6 @@ public class UpdateManager {
     private static final String TAG = "WWAN_UpdateManager";
     public static final String GITHUB_REPO = "dsultanr/f515-usb-wwan";
     public static final String LATEST_RELEASE_URL = "https://api.github.com/repos/" + GITHUB_REPO + "/releases/latest";
-    public static final String UPDATE_APK_PATH = "/data/local/tmp/wwan/update.apk";
 
     public static class ReleaseInfo {
         public final String tagName;
@@ -168,7 +167,7 @@ public class UpdateManager {
 
     /**
      * Загрузка APK по прямой ссылке (с поддержкой 302-редиректов GitHub -> S3)
-     * и последующая тихая установка через Keeper.
+     * и установка через PackageInstaller Session API.
      */
     public static void downloadAndInstall(final Context ctx, final ReleaseInfo release, final Keeper.Progress progress) {
         new Thread(new Runnable() {
@@ -224,15 +223,9 @@ public class UpdateManager {
 
                     progress.onLine("> Загрузка завершена (" + (downloaded / 1024) + " KB). Подготовка к установке...");
 
-                    // Копируем во временный путь /data/local/tmp/wwan/update.apk и запускаем тихий установщик
-                    File target = new File(UPDATE_APK_PATH);
-                    if (target.getParentFile() != null) target.getParentFile().mkdirs();
-
-                    // Деплоим APK на ГУ и вызываем тихий установщик
-                    progress.onLine("> Запуск тихой установки APK...");
-                    Keeper.exec(ctx, null, "cat > " + UPDATE_APK_PATH + " < " + tempFile.getAbsolutePath() + " 2>/dev/null || cp " + tempFile.getAbsolutePath() + " " + UPDATE_APK_PATH, progress);
-                    String res = Keeper.runInstallUpdate(ctx, UPDATE_APK_PATH, progress);
-                    progress.onLine(res);
+                    // Ставим прямо из своего кэша через PackageInstaller — ни adbd, ни
+                    // /data/local/tmp в этом пути больше не участвуют (см. ApkInstaller).
+                    ApkInstaller.install(ctx, tempFile, progress);
 
                 } catch (Exception e) {
                     Log.e(TAG, "downloadAndInstall failed", e);

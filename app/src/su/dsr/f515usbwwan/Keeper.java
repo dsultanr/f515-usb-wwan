@@ -20,7 +20,6 @@ public class Keeper {
     static final String BOOT = DIR + "/wwan-boot.sh";
     static final String FORMAT = DIR + "/format-sdcard.sh";
     static final String ICON = DIR + "/tbox-icon.sh";
-    static final String INSTALL_UPDATE = DIR + "/install-update.sh";
     static final String SMS = DIR + "/sms.sh";
     static final String ADB_HOST = "127.0.0.1";
     static final int ADB_PORT = 5555;
@@ -47,7 +46,6 @@ public class Keeper {
             {"at.sh", "at.sh", Boolean.TRUE},
             {"format-sdcard.sh", "format-sdcard.sh", Boolean.TRUE},
             {"tbox-icon.sh", "tbox-icon.sh", Boolean.TRUE},
-            {"install-update.sh", "install-update.sh", Boolean.TRUE},
             {"sms.sh", "sms.sh", Boolean.TRUE},
             {"tboxwire.jar", "tboxwire.jar", Boolean.FALSE},
             {"huawei-modeswitch", "huawei-modeswitch", Boolean.TRUE},
@@ -86,11 +84,6 @@ public class Keeper {
     /** format-sdcard.sh with the given arguments ("--list" or "--format=sdX"). */
     public static String runFormat(Context ctx, String args, Progress progress) {
         return exec(ctx, FORMAT, args, progress);
-    }
-
-    /** install-update.sh with the given APK path. */
-    public static String runInstallUpdate(Context ctx, String apkPath, Progress progress) {
-        return exec(ctx, INSTALL_UPDATE, apkPath, progress);
     }
 
     /** sms.sh with the given arguments ("list", "delete <id>", "delete_all"). */

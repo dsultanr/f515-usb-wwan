@@ -20,7 +20,7 @@ mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/res-compiled" "$PROJ/assets"
 echo "== assets (scripts + modules + tools)"
 for f in "$ROOT"/scripts/wwan-up.sh "$ROOT"/scripts/wwan-boot.sh \
          "$ROOT"/scripts/dial.sh "$ROOT"/scripts/at.sh "$ROOT"/scripts/format-sdcard.sh \
-         "$ROOT"/scripts/tbox-icon.sh "$ROOT"/scripts/install-update.sh \
+         "$ROOT"/scripts/tbox-icon.sh \
          "$ROOT"/scripts/sms.sh \
          "$ROOT"/tbox/prebuilt/tboxwire.jar \
          "$ROOT"/tools/huawei-modeswitch \

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="su.dsr.f515usbwwan"
-    android:versionCode="42"
-    android:versionName="4.10">
+    android:versionCode="43"
+    android:versionName="4.11">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="29" />
 
@@ -10,6 +10,14 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!--
+        Обновление ставится через PackageInstaller Session API, как это делают файловые
+        менеджеры: adb/pm install вендор режет на уровне canAdbInstall() всегда, а
+        Binder-путь идёт по другому гейту. Помимо этого разрешения нужен ещё и appop
+        REQUEST_INSTALL_PACKAGES — экрана для него на прошивке нет, поэтому приложение
+        выдаёт его себе само через root-adb (ApkInstaller.ensureInstallPermission).
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!--
         directBootAware: BOOT_COMPLETED на этой голове приходит раньше, чем становится
