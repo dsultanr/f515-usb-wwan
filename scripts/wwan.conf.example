@@ -10,3 +10,8 @@ WWAN_APN=internet          # APN оператора (beeline: internet.beeline.k
 #WWAN_DNS=1.1.1.1          # DNS для приложений вместо того, что дал оператор;
                            # auto или пусто — как раньше. Главнее кнопки «DNS» в
                            # приложении (она пишет в state/dns). См. docs/app-network.md
+#WWAN_VPN=1                # совместимость с VPN-клиентами на VpnService (HAPP,
+                           # v2rayNG, WireGuard). Без неё клиент показывает
+                           # «подключено», а трафик приложений идёт мимо туннеля.
+                           # См. docs/app-network.md
+#WWAN_VPN_MAIN_PREF=23500  # куда переезжает вендорское «from all lookup main»

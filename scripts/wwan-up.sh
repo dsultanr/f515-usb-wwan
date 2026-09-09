@@ -26,6 +26,9 @@
 #   wwan-up.sh --dns        показать, какой DNS выдаётся приложениям
 #   wwan-up.sh --dns=1.1.1.1  запомнить кастомный DNS и применить его сейчас
 #   wwan-up.sh --dns=auto   вернуться к DNS оператора/модема (см. docs/app-network.md)
+#   wwan-up.sh --vpn        подвинуть вендорское «from all lookup main» ниже правил
+#                           netd, чтобы работали VPN-клиенты на VpnService
+#   wwan-up.sh --vpn=off    вернуть правила вендора как было
 #
 # Настройки: переменные окружения или /data/local/tmp/wwan.conf (см. wwan.conf.example).
 
@@ -75,6 +78,18 @@ DNS_AUTO_LAST=$STATE/dns-auto
 DNS_WANT=${WWAN_DNS:-}
 [ -n "$DNS_WANT" ] || DNS_WANT=$(cat "$DNS_SETTING" 2>/dev/null)
 CHECK_HOST=${WWAN_CHECK_HOST:-77.88.8.8}
+# Совместимость с VPN-клиентами на VpnService (HAPP, v2rayNG, WireGuard и пр.).
+# Выключено по умолчанию: режим трогает правила вендора, а не только свои.
+# Зачем это нужно и что именно двигается — см. vpn_rules_apply и docs/app-network.md.
+VPN_MODE=${WWAN_VPN:-0}
+# Новое место вендорского catch-all'а. Ниже всех правил netd, которые нас
+# волнуют (VPN 13000/21000, default network 23000), но выше unreachable (32000):
+# так main остаётся последним резервом для трафика, которому netd не нашёл сети,
+# и голова не остаётся без связи, если сотовая сеть не провалидировалась.
+VPN_MAIN_PREF=${WWAN_VPN_MAIN_PREF:-23500}
+# Приоритет для собственных правил проекта («from <адрес>» и «oif <интерфейс>»
+# в таблицу $TABLE). Раньше они добавлялись без pref — см. own_rules_clean.
+RULE_PREF=${WWAN_RULE_PREF:-9980}
 
 CHECK_ONLY=0
 DO_SYSTEM=0
@@ -84,6 +99,7 @@ DO_WIFI_PRIO=0
 DO_DNS=0
 DNS_SET=0
 DO_RECONNECT=0
+DO_VPN=0
 for a in "$@"; do
 	case "$a" in
 	-c | --check)     CHECK_ONLY=1 ;;
@@ -96,6 +112,9 @@ for a in "$@"; do
 	# Значение с аргументом главнее и wwan.conf, и файла: человек только что
 	# назвал адрес явно, спорить с ним нечему.
 	--dns=*)          DO_DNS=1; DNS_SET=1; DNS_WANT=${a#--dns=} ;;
+	# Явный ключ главнее wwan.conf: человек только что сказал, чего хочет.
+	--vpn | --vpn=on) VPN_MODE=1; DO_VPN=1 ;;
+	--vpn=off)        VPN_MODE=0; DO_VPN=1 ;;
 	-h | --help)      sed -n '2,33p' "$0"; exit 0 ;;
 	*) echo "неизвестный аргумент: $a (см. --help)"; exit 64 ;;
 	esac
@@ -588,7 +607,11 @@ at() {
 	)
 }
 
-iface_addr() { ip -4 -o addr show "$1" 2>/dev/null | awk '{print $4}' | cut -d/ -f1; }
+# head -1 обязателен: `ip addr replace` не снимает адреса чужих подсетей, поэтому
+# после смены модема на интерфейсе остаётся и старый адрес, и новый. Без этого
+# функция возвращает две строки, и $ADDR разъезжается по всему выводу — а хуже
+# того, попадает в `ip rule add from "$ADDR"` уже как два аргумента.
+iface_addr() { ip -4 -o addr show "$1" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1; }
 
 # Отвечает ли DNS-сервер. На голове нет ни nslookup, ни dig — есть только
 # busybox (и то не всегда), поэтому «проверить не смогли» и «не отвечает» надо
@@ -660,6 +683,35 @@ tbox_net() {
 # проверяются по порядку, и первым сработало бы старое. Своими считаем ровно
 # DNAT на $TB_DNS:53 — всё прочее в цепочке не наше, про такое только
 # предупреждаем и не трогаем.
+# Свои MASQUERADE в POSTROUTING копятся ровно как копились ip rule: правило
+# привязано к $WAN_IF, и при смене типа модема (eth1 -> wwan0) старое остаётся
+# навсегда. Замерено на F515: висели -o eth1 и -o wwan0 одновременно, хвост от
+# предыдущей сессии.
+#
+# Отбор узкий намеренно: только цепочка POSTROUTING, только -j MASQUERADE, только
+# источник из подсети фантомной сети. Своё правило Android для tethering'а держит
+# в отдельной цепочке natctrl_nat_POSTROUTING и под этот отбор не попадает.
+# Оставляем два актуальных — текущий $WAN_IF и tun+, — остальное снимаем.
+masq_clean() {
+	# Префикс подсети, а не точный $TB_SRC: если у vlan72 сменился адрес, правило
+	# со старым источником уже ни с чем не совпадёт, но и убрано никогда не будет.
+	_mc_net=${TB_SRC%.*}.
+	iptables -w 10 -t nat -S POSTROUTING 2>/dev/null |
+		grep -e "-j MASQUERADE" | grep -e "-s $_mc_net" |
+		while read -r _mc_rule; do
+			case "$_mc_rule" in
+			*"-o $WAN_IF -j MASQUERADE" | *"-o tun+ -j MASQUERADE") continue ;;
+			"-A POSTROUTING "*) ;;
+			*) continue ;;
+			esac
+			warn "снимаю своё прежнее правило: ${_mc_rule#-A }"
+			# Спецификация правила разбивается на слова намеренно: iptables
+			# ждёт её отдельными аргументами, а не одной строкой.
+			# shellcheck disable=SC2086
+			do_it iptables -w 10 -t nat -D ${_mc_rule#-A }
+		done
+}
+
 dns_nat_clean() {
 	_keep=$1
 	iptables -w 10 -t nat -S OUTPUT 2>/dev/null |
@@ -730,6 +782,21 @@ dns_nat() {
 	done
 	iptables -w 10 -t nat -C POSTROUTING -s "$TB_SRC" -o "$WAN_IF" -j MASQUERADE 2>/dev/null ||
 		do_it iptables -w 10 -t nat -A POSTROUTING -s "$TB_SRC" -o "$WAN_IF" -j MASQUERADE
+	# То же самое для туннеля VpnService, и без этой строки VPN на голове
+	# бесполезен. Правило выше привязано к $WAN_IF, то есть исходит из того, что
+	# DNS всегда уходит через модем. Это верно ровно до тех пор, пока трафик не
+	# начинает попадать в туннель: после DNAT адрес назначения уже внешний, а
+	# внешний адрес при работающем VpnService резолвится в tun0, а не в $WAN_IF.
+	# Подмена источника не срабатывает, запрос уходит в туннель с адресом
+	# 192.168.72.4 — на той стороне он не значит ничего, ответ вернуться не
+	# может. Приложения получают ERR_NAME_NOT_RESOLVED при живом клиенте,
+	# который честно показывает «подключено».
+	#
+	# Замерено на F515: одна эта строка чинит резолвинг целиком. Без VPN правило
+	# не срабатывает никогда — tun0 просто нет, — поэтому ставим безусловно.
+	iptables -w 10 -t nat -C POSTROUTING -s "$TB_SRC" -o tun+ -j MASQUERADE 2>/dev/null ||
+		do_it iptables -w 10 -t nat -A POSTROUTING -s "$TB_SRC" -o tun+ -j MASQUERADE
+	masq_clean
 	if [ "$DNS_IS_CUSTOM" = 1 ]; then
 		ok "DNS приложений: $_dns (задан вручную; было $TB_DNS) через $WAN_IF"
 	else
@@ -754,6 +821,207 @@ add_default() {
 	else
 		do_it ip route replace default via "$GW" dev "$WAN_IF" table "$_tbl" metric "$_metric"
 	fi
+}
+
+# ------------------------------------------------ свои правила в таблицу WAN --
+# Как таблица проекта называется в выводе `ip rule show`. Полагаться на rt_tables
+# нельзя: на голове /etc/iproute2/rt_tables нет вовсе, а /data/misc/net/rt_tables
+# может быть недоступен. Тогда функция вернёт «99», ядро напечатает
+# «lookup legacy_system», совпадения не будет и чистка молча не найдёт ни одного
+# своего правила — ровно это и случилось на F515.
+#
+# Поэтому спрашиваем у ядра: ставим временное правило на заведомо свободный
+# приоритет и смотрим, как оно напечаталось. Правило снимается сразу же.
+table_name() {
+	_tn_p=32765
+	# Проба по fwmark, а не по «from <адрес>»: own_rules отсеивает строки с
+	# fwmark по построению, поэтому даже если кто-то увидит правило до его
+	# снятия, оно не попадёт в список своих.
+	ip rule add pref "$_tn_p" fwmark 0xdead table "$1" 2>/dev/null || { echo "$1"; return; }
+	_tn=$(ip rule show 2>/dev/null | sed -n "s/^$_tn_p:.*lookup \([^ ]*\).*/\1/p" | head -1)
+	ip rule del pref "$_tn_p" fwmark 0xdead table "$1" 2>/dev/null
+	echo "${_tn:-$1}"
+}
+
+# Раньше правила добавлялись без pref. `ip rule add` без него берёт приоритет
+# «второе правило в списке минус один», поэтому каждый новый адрес модема или
+# головы давал ещё одну строку на приоритет ниже: 9998, 9997, 9996... За
+# несколько сессий набирается с десяток, включая [detached] и адреса давно
+# отключённых модемов. Замерено на F515: шесть правил, два из них detached.
+#
+# И это не косметика. Все они выше правил VPN (12000), то есть каждая такая
+# строка — ещё один путь мимо туннеля для трафика с соответствующим источником.
+#
+# Ищем строго свои: селектор «from <адрес>» или «oif <интерфейс>» и наша
+# таблица. Правила netd в ту же таблицу ходят по fwmark — их не трогаем.
+#
+# Имя таблицы берём последним полем строки, а не регуляркой с якорем `$`:
+# `ip rule show` на голове печатает строки с хвостовым пробелом, и
+# «lookup legacy_system$» не совпадает ни с чем. Проверено дважды — оба раза
+# чистка молча не находила ничего. awk при разбиении на поля хвост съедает сам.
+# Для «9997: from all oif eth1 [detached] lookup legacy_system» последнее поле
+# всё равно имя таблицы, «[detached]» стоит раньше.
+own_rules() {
+	ip rule show 2>/dev/null | awk -v t1="$TABLE" -v t2="$1" '
+		!/fwmark/ && ($NF == t1 || $NF == t2) && (/from [0-9]/ || /oif /) { print }'
+}
+
+own_rules_clean() {
+	# Имя таблицы вычисляем ОДИН раз и до конвейера. Если звать table_name прямо
+	# в аргументах awk, левая часть конвейера стартует одновременно с раскрытием
+	# аргументов правой — и `ip rule show` успевает увидеть пробное правило.
+	_oc_t=$(table_name "$TABLE")
+	_oc_n=$(own_rules "$_oc_t" | wc -l | tr -d ' ')
+	if [ "${_oc_n:-0}" -eq 0 ] 2>/dev/null; then
+		skip "старых правил в таблице $TABLE нет"
+		return 0
+	fi
+	own_rules "$_oc_t" | while read -r _oc_line; do
+		_oc_pref=${_oc_line%%:*}
+		# «[detached]» ядро печатает для исчезнувших интерфейсов, но обратно в
+		# `ip rule del` его отдавать нельзя — селектор не разберётся.
+		_oc_sel=$(echo "${_oc_line#*:}" |
+			sed 's/\[detached\]//; s/lookup .*//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+		# shellcheck disable=SC2086
+		do_it ip rule del pref "$_oc_pref" $_oc_sel table "$TABLE" 2>/dev/null ||
+			warn "не снялось старое правило $_oc_pref ($_oc_sel)"
+	done
+	# Отчёт обязателен: молчание при нуле снятых правил уже дважды скрывало то,
+	# что функция вообще ничего не нашла.
+	ok "старых правил снято: $_oc_n"
+}
+
+# ------------------------------------------------------- совместимость с VPN --
+# Ровно то, на чём держится вся раздача интернета приложениям, ломает VpnService.
+#
+# Вендор держит «from all lookup main» на приоритете 9999 — ВЫШЕ всех правил
+# netd. Правила, которыми Android заворачивает трафик приложений в туннель,
+# стоят на 13000 (secure VPN) и 21000 (bypassable VPN, обычный случай), то есть
+# ниже. Пока в main нет default'а, это безобидно: lookup не находит совпадения,
+# ядро проваливается дальше и доходит до правил VPN. Но `--system` кладёт в main
+# именно catch-all — и с этого момента правило 9999 матчит вообще всё, от любого
+# UID, независимо от fwmark. В tun0 не попадает ни одного пакета.
+#
+# Клиент при этом честно показывает «подключено»: его собственный сокет до
+# сервера — обычное соединение, оно тоже уходит через модем и хендшейк проходит.
+# Просто заворачивать в туннель нечего.
+#
+# Побочно ломается и «Блокировать соединения без VPN»: правило запрета netd тоже
+# ниже 9999 и не срабатывает — то есть это не только «VPN не работает», это
+# настоящая утечка мимо туннеля.
+#
+# Чинится переносом, а не удалением. Вендорское правило нужно не ради default'а,
+# а ради конкретных маршрутов в main (подсети модема, LAN HiLink'а, служебные
+# интерфейсы) — их разрешать рано как раз правильно. Поэтому:
+#
+#   9998:  from all lookup main suppress_prefixlength 0   <- всё, кроме default
+#   ...    правила netd, включая VPN (13000/21000) и default network (23000)
+#   23500: from all lookup main                           <- default, но последним
+#
+# suppress_prefixlength 0 убирает из выдачи ровно маршруты с длиной префикса <= 0,
+# то есть один default. Остальное в main работает как работало.
+VPN_SUPPRESS_OFFSET=1
+
+# Вендорские catch-all'ы: «from all lookup main» с приоритетом выше правил netd.
+# Их может быть несколько (на этой голове занят диапазон 9990-9999), поэтому
+# перебираем все, а не ищем один захардкоженный 9999.
+#
+# suppress_prefixlength отсекаем обязательно: наше же половинчатое правило
+# печатается как «from all lookup main suppress_prefixlength 0» и без этой
+# проверки попадает под шаблон. Watchdog зовёт скрипт раз в минуту — правило
+# уезжало бы на приоритет ниже при каждом заходе, и за сутки их накопилось бы
+# полторы тысячи.
+vpn_vendor_prefs() {
+	_vp_ip=$1
+	$_vp_ip rule show 2>/dev/null |
+		awk -F: '/from all lookup main/ && !/suppress_prefixlength/ &&
+			$1+0 > 0 && $1+0 < 10000 {print $1+0}'
+}
+
+# Уже перенесено? Признак — наш catch-all на новом месте.
+vpn_rules_moved() {
+	_vm_ip=$1
+	$_vm_ip rule show 2>/dev/null | grep -q "^$VPN_MAIN_PREF:.*lookup main"
+}
+
+vpn_rules_apply() {
+	_va_ip=$1
+	_va_fam=$2
+	_va_prefs=$(vpn_vendor_prefs "$_va_ip")
+	if [ -z "$_va_prefs" ]; then
+		if vpn_rules_moved "$_va_ip"; then
+			skip "$_va_fam: правила уже перенесены"
+		else
+			skip "$_va_fam: вендорского «from all lookup main» нет — двигать нечего"
+		fi
+		return 0
+	fi
+
+	# Порядок операций здесь несущий. Catch-all на новом месте ставим ПЕРВЫМ:
+	# между снятием старого правила и появлением нового непомеченный трафик
+	# (это и adb, и сам этот скрипт) остался бы без default'а, а на ядре без
+	# FRA_SUPPRESS_PREFIXLEN — остался бы так навсегда.
+	vpn_rules_moved "$_va_ip" ||
+		do_it $_va_ip rule add pref "$VPN_MAIN_PREF" from all table main ||
+		{ warn "$_va_fam: не удалось поставить catch-all на $VPN_MAIN_PREF"; return 1; }
+
+	for _va_p in $_va_prefs; do
+		_va_sp=$((_va_p - VPN_SUPPRESS_OFFSET))
+		if ! $_va_ip rule show 2>/dev/null | grep -q "^$_va_sp:.*suppress_prefixlength"; then
+			if ! do_it $_va_ip rule add pref "$_va_sp" from all table main \
+				suppress_prefixlength 0 2>/dev/null; then
+				warn "$_va_fam: ядро/iproute2 не умеют suppress_prefixlength"
+				warn "режим VPN на этой прошивке недоступен, откатываю"
+				do_it $_va_ip rule del pref "$VPN_MAIN_PREF" from all table main 2>/dev/null
+				return 1
+			fi
+		fi
+		do_it $_va_ip rule del pref "$_va_p" from all table main 2>/dev/null ||
+			warn "$_va_fam: правило $_va_p не снялось — проверь ip rule show"
+		ok "$_va_fam: $_va_p -> $_va_sp (без default) + $VPN_MAIN_PREF (default ниже правил VPN)"
+	done
+	return 0
+}
+
+vpn_rules_restore() {
+	_vr_ip=$1
+	_vr_fam=$2
+	if ! vpn_rules_moved "$_vr_ip" &&
+		[ -z "$($_vr_ip rule show 2>/dev/null | grep suppress_prefixlength)" ]; then
+		skip "$_vr_fam: правила вендора не тронуты"
+		return 0
+	fi
+	# Обратный порядок: сначала возвращаем полное правило на исходный приоритет,
+	# и только потом снимаем половинчатое. Голова ни на секунду не остаётся без
+	# main — то же соображение, что и в vpn_rules_apply, но задом наперёд.
+	for _vr_sp in $($_vr_ip rule show 2>/dev/null |
+		awk -F: '/lookup main/ && /suppress_prefixlength/ {print $1+0}'); do
+		_vr_p=$((_vr_sp + VPN_SUPPRESS_OFFSET))
+		$_vr_ip rule show 2>/dev/null | grep "^$_vr_p:.*from all lookup main" |
+			grep -qv suppress_prefixlength ||
+			do_it $_vr_ip rule add pref "$_vr_p" from all table main
+		do_it $_vr_ip rule del pref "$_vr_sp" from all table main \
+			suppress_prefixlength 0 2>/dev/null || true
+		ok "$_vr_fam: правило $_vr_p возвращено на место"
+	done
+	do_it $_vr_ip rule del pref "$VPN_MAIN_PREF" from all table main 2>/dev/null || true
+	return 0
+}
+
+# Поднят ли сейчас туннель VpnService. Имя интерфейса у всех клиентов одно и то
+# же (tun0/tun1) — его создаёт сам Android, а не приложение.
+vpn_tun_iface() {
+	ip -o link show 2>/dev/null | awk -F': ' '$2 ~ /^tun[0-9]+$/ {print $2; exit}'
+}
+
+# Диагностика для --check: молчит, пока всё хорошо.
+vpn_shadow_warn() {
+	_vs_tun=$(vpn_tun_iface)
+	[ -n "$_vs_tun" ] || return 0
+	[ -n "$(vpn_vendor_prefs ip)" ] || return 0
+	ip route show table main 2>/dev/null | grep -q '^default' || return 0
+	warn "поднят туннель $_vs_tun, но default в main перехватывается правилом вендора"
+	warn "трафик приложений идёт МИМО туннеля — включи WWAN_VPN=1 (docs/app-network.md)"
 }
 
 # ------------------------------------------------------------------- --down --
@@ -804,6 +1072,26 @@ if [ "$DO_DNS" = 1 ]; then
 	exit 0
 fi
 
+# Отдельный короткий режим: только правила маршрутизации, без модема. Полезен и
+# сам по себе (починить VPN на уже поднятой связи), и чтобы откатиться, ничего
+# не роняя. С --system сюда не заходим — там перенос делается своей стадией.
+if [ "$DO_VPN" = 1 ] && [ "$DO_SYSTEM" = 0 ]; then
+	stage "правила маршрутизации для VPN"
+	if [ "$VPN_MODE" = 1 ]; then
+		vpn_rules_apply ip IPv4 || exit 1
+		[ -n "$(vpn_vendor_prefs 'ip -6')" ] && vpn_rules_apply 'ip -6' IPv6
+		say ""
+		say "Правила живут до перезагрузки. Чтобы применялось само —"
+		say "допиши WWAN_VPN=1 в $CONF."
+		say "Таблицу сети приложений это НЕ трогает: если интернет им сейчас даёт"
+		say "модем, прогони ещё раз wwan-up.sh --system."
+	else
+		vpn_rules_restore ip IPv4
+		vpn_rules_restore 'ip -6' IPv6
+	fi
+	exit 0
+fi
+
 if [ "$DO_DOWN" = 1 ]; then
 	stage "остановка"
 	_pids=$(pidof pppd 2>/dev/null)
@@ -816,6 +1104,7 @@ if [ "$DO_DOWN" = 1 ]; then
 	say "Маршруты, правила и hilink-интерфейс скрипт НЕ трогает. Убрать вручную:"
 	say "   ip route del default table $TABLE"
 	say "   ip rule del oif ppp0 table $TABLE"
+	vpn_rules_moved ip && say "   wwan-up.sh --vpn=off   (вернуть правила вендора)"
 	exit 0
 fi
 
@@ -1402,8 +1691,11 @@ if [ -z "$ADDR" ] && [ "$CHECK_ONLY" = 1 ]; then
 	skip "$WAN_IF не поднят"
 else
 	add_default "$TABLE" 10
-	ip rule show 2>/dev/null | grep -q "from $ADDR " || do_it ip rule add from "$ADDR" table "$TABLE"
-	ip rule show 2>/dev/null | grep -q "oif $WAN_IF " || do_it ip rule add oif "$WAN_IF" table "$TABLE"
+	# Сначала снять старые, потом поставить свои на фиксированный приоритет —
+	# иначе они продолжат уползать вниз с каждым запуском.
+	own_rules_clean
+	do_it ip rule add pref "$RULE_PREF" from "$ADDR" table "$TABLE"
+	do_it ip rule add pref "$((RULE_PREF + 1))" oif "$WAN_IF" table "$TABLE"
 	ok "маршрут по умолчанию для $WAN_IF в таблице $TABLE"
 
 	if [ "$CHECK_ONLY" = 0 ]; then
@@ -1414,6 +1706,10 @@ else
 			warn "у оператора может быть заблокирован ICMP — проверь curl/nslookup"
 		fi
 	fi
+	# Именно здесь, а не в стадии --system: кнопка «Проверка» в приложении зовёт
+	# голый --check, до стадии для приложений дело не доходит вовсе, а увидеть
+	# «клиент говорит подключено, а трафик мимо» человеку надо как раз в ней.
+	[ "$VPN_MODE" = 1 ] || vpn_shadow_warn
 fi
 
 # ------------------------------------------------- опционально: приложения --
@@ -1469,9 +1765,30 @@ if [ "$DO_SYSTEM" = 1 ]; then
 
 	if [ -z "$TB_SRC" ]; then
 		warn "у $TB_IF нет адреса — эта сеть сейчас не активна, пропускаю"
-	elif ip route show table "$TB_IF" 2>/dev/null | grep -q "^default.* dev $WAN_IF"; then
+	elif ip route show table "$TB_IF" 2>/dev/null | grep -q "^default.* dev $WAN_IF" &&
+		! ip route show table "$TB_IF" 2>/dev/null | grep '^default' | grep -qv " dev $WAN_IF "; then
 		skip "таблица $TB_IF уже указывает на $WAN_IF"
 	else
+		# Штатный default этой сети netd ставит без метрики, то есть с metric 0 —
+		# он ЛУЧШЕ нашей пятёрки и тихо выигрывает у неё отбор. Пока он на месте,
+		# add_default здесь не решает ничего: пакет всё равно уходит в мёртвый L2,
+		# просто теперь рядом лежит и живой маршрут, которым никто не пользуется.
+		# Прежняя проверка выше этого не ловила: она смотрела, есть ли НАШ
+		# маршрут, а не выигрывает ли он.
+		#
+		# Снимаем только в режиме VPN. Без него таблица всё равно не участвует
+		# (весь трафик разбирает правило вендора через main), а трогать маршруты
+		# netd без нужды не стоит: он их переставит при первой же переконфигурации
+		# сети, и watchdog будет чинить это по кругу.
+		if [ "$VPN_MODE" = 1 ]; then
+			ip route show table "$TB_IF" 2>/dev/null | grep '^default' |
+				grep -v " dev $WAN_IF " |
+				while read -r _tb_dead; do
+					warn "снимаю мёртвый маршрут: $_tb_dead"
+					# shellcheck disable=SC2086
+					do_it ip route del $_tb_dead table "$TB_IF" 2>/dev/null || true
+				done
+		fi
 		add_default "$TB_IF" 5
 		ok "таблица $TB_IF: default переключён на $WAN_IF (приложения теперь идут через модем)"
 	fi
@@ -1484,6 +1801,27 @@ if [ "$DO_SYSTEM" = 1 ]; then
 	# наружу обычным путём. Здесь же применяется кастомный DNS — подробности,
 	# почему другого места для него нет, в комментарии к dns_nat.
 	dns_nat "$DNS"
+
+	# ---------------------------------------------- совместимость с VpnService --
+	if [ "$VPN_MODE" = 1 ]; then
+		if vpn_rules_apply ip IPv4; then
+			# Проверка сразу после переноса. Разрешается ли непомеченный трафик —
+			# это и adb, и watchdog, и сам этот скрипт. Не разрешается — откат
+			# без вопросов: остаться без управления на голове в машине хуже, чем
+			# остаться без VPN.
+			if [ "$CHECK_ONLY" = 1 ]; then
+				skip "проверка после переноса пропущена (--check ничего не менял)"
+			elif ip route get "$CHECK_HOST" >/dev/null 2>&1; then
+				ok "непомеченный трафик по-прежнему разрешается"
+			else
+				warn "после переноса ip route get $CHECK_HOST не разрешается — откатываю"
+				vpn_rules_restore ip IPv4
+			fi
+		fi
+		# IPv6 — только если у вендора есть такое же правило. Своего v6 у модема
+		# здесь нет, но оставлять v6-утечку мимо туннеля при живом v6 нельзя.
+		[ -n "$(vpn_vendor_prefs 'ip -6')" ] && vpn_rules_apply 'ip -6' IPv6
+	fi
 
 	# Признак, который реально видят приложения (не заглядывая внутрь netd):
 	# ConnectivityService перепроверяет валидацию не мгновенно — сразу после
