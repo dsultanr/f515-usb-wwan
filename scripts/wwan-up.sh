@@ -30,6 +30,8 @@
 #                           netd, чтобы работали VPN-клиенты на VpnService
 #   wwan-up.sh --vpn=off    вернуть правила вендора как было
 #   wwan-up.sh --vpn-status показать текущее состояние режима VPN
+#   wwan-up.sh --modcheck   отчёт по модулям ядра: чем собраны наши .ko, что за
+#                           сборка ядра на голове, сойдётся ли ABI (и почему нет)
 #
 # Настройки: переменные окружения или /data/local/tmp/wwan.conf (см. wwan.conf.example).
 
@@ -101,6 +103,7 @@ DO_DOWN=0
 BOOT_MODE=0
 DO_WIFI_PRIO=0
 DO_DNS=0
+DO_MODCHECK=0
 DNS_SET=0
 DO_RECONNECT=0
 DO_VPN=0
@@ -114,6 +117,7 @@ for a in "$@"; do
 	--down)           DO_DOWN=1 ;;
 	--boot)           BOOT_MODE=1 ;;
 	--wifi-prio)      DO_WIFI_PRIO=1 ;;
+	--modcheck)       DO_MODCHECK=1 ;;
 	--dns)            DO_DNS=1 ;;
 	# Значение с аргументом главнее и wwan.conf, и файла: человек только что
 	# назвал адрес явно, спорить с ним нечему.
@@ -122,7 +126,7 @@ for a in "$@"; do
 	--vpn-status | --vpn=status) DO_VPN=1; VPN_STATUS_ONLY=1 ;;
 	--vpn | --vpn=on) VPN_MODE=1; DO_VPN=1; VPN_SET=1 ;;
 	--vpn=off)        VPN_MODE=0; DO_VPN=1; VPN_SET=1 ;;
-	-h | --help)      sed -n '2,34p' "$0"; exit 0 ;;
+	-h | --help)      sed -n '2,36p' "$0"; exit 0 ;;
 	*) echo "неизвестный аргумент: $a (см. --help)"; exit 64 ;;
 	esac
 done
@@ -505,7 +509,132 @@ at_candidates() {
 	echo $_ac_list
 }
 
-ko_vermagic() { grep -ao 'vermagic=[^[:space:]]*' "$1" 2>/dev/null | head -1 | cut -d= -f2; }
+# Строка vermagic из .ko целиком: "<release> SMP preempt mod_unload modversions aarch64".
+# Диапазон [ -~] (печатные ASCII) обрывает совпадение на NUL: в .modinfo записи лежат
+# встык через нули, и жадный [^[:space:]] прихватил бы соседнюю.
+ko_vermagic_full()  { grep -ao 'vermagic=[ -~]*' "$1" 2>/dev/null | head -1 | cut -d= -f2-; }
+ko_vermagic()       { ko_vermagic_full "$1" | cut -d' ' -f1; }
+# Хвост флагов конфига — ровно то, что ядро и сверяет строкой (см. load_module).
+ko_vermagic_flags() { ko_vermagic_full "$1" | cut -s -d' ' -f2-; }
+
+# CRC символа module_layout из секции __versions модуля. Именно он кодирует раскладку
+# struct module, и именно по нему ядро проверяет, что модуль собран под это ядро.
+#
+# ELF не разбираем — на голове нечем. __versions это массив
+# struct modversion_info { unsigned long crc; char name[56]; } по 64 байта, то есть CRC
+# лежит в восьми байтах ПЕРЕД именем: ищем имя по всему файлу и отсеиваем случайные
+# попадания (в .strtab, например) по старшим четырём байтам unsigned long — у настоящей
+# записи они нулевые, CRC всегда 32-битный. od -tx4 печатает little-endian слово как
+# число, поэтому первые восемь hex-цифр и есть CRC в привычном виде.
+ko_module_layout_crc() {
+	have od || return 1
+	for _mlo in $(grep -abo 'module_layout' "$1" 2>/dev/null | cut -d: -f1); do
+		[ "$_mlo" -ge 8 ] 2>/dev/null || continue
+		_mlc=$(dd if="$1" bs=1 skip=$((_mlo - 8)) count=8 2>/dev/null |
+			od -An -tx4 2>/dev/null | tr -d ' \n')
+		case "$_mlc" in
+		????????00000000) echo "${_mlc%00000000}"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+# Эталон для сверки — любой штатный модуль головы: он собран ровно этим ядром и ровно
+# этим тулчейном, то есть его __versions и флаги vermagic и есть правда о голове
+# (uname -r даёт только release, а надо ещё раскладку и флаги). Берём первый, из
+# которого CRC вообще достаётся.
+oem_reference_ko() {
+	for _oref in /vendor/lib/modules/*.ko; do
+		[ -f "$_oref" ] || continue
+		[ -n "$(ko_module_layout_crc "$_oref")" ] || continue
+		echo "$_oref"
+		return 0
+	done
+	return 1
+}
+
+# Модуль собран другой сборкой того же ядра (release отличается только OEM-хвостом
+# вроде -gc8e10aca1899-dirty). Можно ли его грузить, решает эта функция: возвращает
+# 0/1 и кладёт объяснение в OB_WHY, а «что делать» — в OB_FIX.
+#
+# Отказывать по одному лишь несовпадению строки нельзя: ядро само сравнивает vermagic
+# не целиком. При CONFIG_MODVERSIONS same_magic() (kernel/module.c) пропускает первое
+# слово, то есть release, и сверяет только хвост флагов, а раскладку проверяет по CRC
+# module_layout из __versions. Прошивки одной и той же головы отличаются как раз
+# хвостом release при том же ABI — гонять человека на пересборку из-за метки сборки
+# значит требовать исходники ядра там, где всё и так сойдётся.
+#
+# Опасен ровно один случай: модуль БЕЗ записи module_layout в __versions. Тогда
+# раскладку не проверит никто, insmod пройдёт молча и порвёт память ядра. Его и ловим.
+#
+# Отдельной функцией — потому что тот же вердикт печатает --modcheck, а две копии
+# этой логики неминуемо разъехались бы. Результат через переменные, а не строкой
+# "ok|...": /system/bin/sh на голове — mksh, а в нём «|» внутри ${v#шаблон} значит
+# альтернативу, и такой срез молча не отрезает ничего.
+OB_WHY=
+OB_FIX=
+other_build_verdict() {
+	_ov_ko=$1
+	_ov_vm=$2
+	_ov_kr=$3
+	OB_WHY=
+	OB_FIX=
+
+	_ov_our=$(ko_module_layout_crc "$_ov_ko")
+	if [ -z "$_ov_our" ]; then
+		OB_WHY="модуль собран для ядра '$_ov_vm', а на голове '$_ov_kr'"
+		OB_FIX="в модуле нет module_layout в __versions — раскладку struct module не проверит даже ядро, вслепую грузить нельзя: пересобрать (modules/build-cfi.sh, oem.symvers снять с этой головы)"
+		return 1
+	fi
+
+	_ov_ref=$(oem_reference_ko)
+	if [ -z "$_ov_ref" ]; then
+		OB_WHY="штатного модуля для сверки не нашлось, но раскладку проверит ядро по CRC module_layout ($_ov_our) — при несовпадении insmod откажет с ошибкой"
+		return 0
+	fi
+
+	_ov_oem=$(ko_module_layout_crc "$_ov_ref")
+	if [ "$_ov_our" != "$_ov_oem" ]; then
+		OB_WHY="раскладка struct module не совпадает с головой (module_layout $_ov_our против $_ov_oem у $(basename "$_ov_ref"))"
+		OB_FIX="это другая сборка ядра, а не другая метка — пересобрать модули под неё (modules/build-cfi.sh)"
+		return 1
+	fi
+
+	_ov_ourf=$(ko_vermagic_flags "$_ov_ko")
+	_ov_oemf=$(ko_vermagic_flags "$_ov_ref")
+	if [ "$_ov_ourf" != "$_ov_oemf" ]; then
+		OB_WHY="флаги vermagic не совпадают ('$_ov_ourf' против '$_ov_oemf')"
+		OB_FIX="этот хвост ядро сверяет строкой и откажет 'version magic ... should be ...' — пересобрать с конфигом этой головы (adb shell zcat /proc/config.gz)"
+		return 1
+	fi
+
+	OB_WHY="ABI сходится (module_layout $_ov_our, флаги '$_ov_ourf')"
+	return 0
+}
+
+# То же самое перед insmod: несогласие тут фатально.
+check_other_build() {
+	if other_build_verdict "$1" "$3" "$4"; then
+		warn "$2: модуль от другой сборки ядра ('$3', на голове '$4')"
+		ok "$2: $OB_WHY — грузим"
+	else
+		die "$2: $OB_WHY" "$OB_FIX"
+	fi
+}
+
+# Что ядро сказало про модуль. insmod возвращает только errno, а причину — какого
+# символа не хватило, чей CRC не сошёлся, на чём споткнулась CFI-проверка — ядро
+# печатает в kmsg; без этого хвоста отказ разбирать нечем.
+kmsg_tail() {
+	have dmesg || return 0
+	_km=$(dmesg 2>/dev/null | grep -iE "$1|module|symbol|magic|cfi" | tail -10)
+	[ -n "$_km" ] || return 0
+	say "   dmesg (последнее про модули):"
+	echo "$_km" | while IFS= read -r _kml; do say "     $_kml"; done
+}
+
+# die для отказов insmod: сначала показать kmsg, потом уже умирать.
+die_mod() { kmsg_tail "$1"; die "$2" "$3"; }
 
 # Загрузка модуля с переводом ошибок insmod на человеческий.
 load_module() {
@@ -524,17 +653,17 @@ load_module() {
 	[ -f "$_ko" ] || die "$_name: нет файла $_ko" \
 		"положи .ko рядом со скриптом или укажи WWAN_MODDIR"
 
-	# Главная проверка перед insmod: vermagic. Несовпадение = гарантированная
-	# порча памяти ядра вплоть до паники, поэтому дальше не идём.
+	# Главная проверка перед insmod — совпадение ABI. Совпал release в vermagic:
+	# сборка наша, вопросов нет. Не совпал — это ещё не приговор, разбирается
+	# check_other_build (там же объяснение, почему строка не решает).
 	_vm=$(ko_vermagic "$_ko")
 	_kr=$(uname -r)
 	if [ -z "$_vm" ]; then
 		warn "$_name: в модуле нет vermagic — проверить не получилось"
-	elif [ "$_vm" != "$_kr" ]; then
-		die "$_name: модуль собран для ядра '$_vm', а на голове '$_kr'" \
-			"пересобрать модули под это ядро (modules/build-cfi.sh)"
-	else
+	elif [ "$_vm" = "$_kr" ]; then
 		ok "$_name: vermagic совпадает ($_vm)"
+	else
+		check_other_build "$_ko" "$_name" "$_vm" "$_kr"
 	fi
 	if [ "$(grep -ac '__cfi_check' "$_ko" 2>/dev/null)" = "0" ]; then
 		die "$_name: в модуле нет __cfi_check" \
@@ -571,16 +700,16 @@ load_module() {
 		skip "$_name: уже загружен"
 		return 0 ;;
 	*"Invalid module format"* | *"invalid module format"*)
-		die "$_name: ядро отвергло формат модуля ($_err)" \
-			"почти всегда это несовпадение vermagic/раскладки struct module — пересобрать" ;;
+		die_mod "$_name" "$_name: ядро отвергло формат модуля ($_err)" \
+			"в dmesg точная причина: 'disagrees about version of symbol module_layout' — другая сборка ядра, 'version magic ... should be ...' — другой конфиг; лечится пересборкой (modules/build-cfi.sh)" ;;
 	*"Unknown symbol"*)
-		die "$_name: не хватает символов ядра ($_err)" \
-			"смотри dmesg: ядро печатает, какого именно символа нет" ;;
+		die_mod "$_name" "$_name: не хватает символов ядра ($_err)" \
+			"ядро печатает выше, какого именно символа нет" ;;
 	*"Operation not permitted"*)
-		die "$_name: insmod запрещён ($_err)" \
+		die_mod "$_name" "$_name: insmod запрещён ($_err)" \
 			"проверь, что шелл root и SELinux не Enforcing" ;;
 	*)
-		die "$_name: insmod не сработал ($_err)" "смотри dmesg" ;;
+		die_mod "$_name" "$_name: insmod не сработал ($_err)" "подробности выше в dmesg" ;;
 	esac
 }
 
@@ -1034,6 +1163,60 @@ vpn_shadow_warn() {
 # ------------------------------------------------------------------- --down --
 # Отдельный короткий режим для watchdog'а: ни логов, ни стадий, ни шапки —
 # только пересчёт приоритета. Печатает строку, если что-то поменял.
+# Отчёт по модулям ядра (--modcheck): всё, по чему ядро решает, брать модуль или
+# нет. Ничего не меняет и ничего не грузит — это то, что имеет смысл прислать,
+# когда на чужой голове insmod отказал (или, наоборот, прошёл, а драйвера нет).
+mod_diag() {
+	_md_kr=$(uname -r)
+	say "== модули ядра"
+	say "   ядро головы:  $_md_kr"
+	have getenforce && say "   SELinux:      $(getenforce 2>/dev/null)"
+	_md_ref=$(oem_reference_ko)
+	if [ -n "$_md_ref" ]; then
+		say "   эталон:       $_md_ref"
+		say "     vermagic:   $(ko_vermagic_full "$_md_ref")"
+		say "     layout:     $(ko_module_layout_crc "$_md_ref")"
+	else
+		say "   эталон:       штатного модуля с __versions в /vendor/lib/modules не нашлось"
+	fi
+
+	for _md_n in usbserialmerged2.ko ppp_async.ko cdc-wdm.ko cdc_ncm.ko \
+		huawei_cdc_ncm.ko f515_rndis.ko; do
+		_md_d=$(mod_dir "$_md_n")
+		_md_ko=$_md_d/$_md_n
+		say ""
+		if [ ! -f "$_md_ko" ]; then
+			say "   $_md_n: нет файла (искали в $_md_d)"
+			continue
+		fi
+		say "   $_md_n ($(stat -c %s "$_md_ko" 2>/dev/null) байт, $_md_d)"
+		say "     vermagic:   $(ko_vermagic_full "$_md_ko")"
+		say "     layout:     $(ko_module_layout_crc "$_md_ko")"
+		say "     cfi_check:  $(grep -ac '__cfi_check' "$_md_ko" 2>/dev/null)"
+		_md_vm=$(ko_vermagic "$_md_ko")
+		if [ "$_md_vm" = "$_md_kr" ]; then
+			say "     вердикт:    собран ровно этим ядром"
+		else
+			if other_build_verdict "$_md_ko" "$_md_vm" "$_md_kr"; then
+				say "     вердикт:    грузим — $OB_WHY"
+			else
+				say "     вердикт:    НЕ грузим — $OB_WHY"
+				say "                 -> $OB_FIX"
+			fi
+		fi
+	done
+
+	say ""
+	say "   загружено сейчас:"
+	lsmod 2>/dev/null | while IFS= read -r _md_l; do say "     $_md_l"; done
+	kmsg_tail 'usbserial|option|ppp|ncm|wdm|rndis'
+}
+
+if [ "$DO_MODCHECK" = 1 ]; then
+	mod_diag
+	exit 0
+fi
+
 if [ "$DO_WIFI_PRIO" = 1 ]; then
 	wifi_priority
 	exit 0
@@ -1551,8 +1734,13 @@ if [ "$MODE" = ppp ]; then
 
 	if [ "$DO_RECONNECT" = 0 ] && pidof pppd >/dev/null 2>&1; then
 		skip "pppd уже держит порт — AT-опрос пропускаем"
-	elif [ "$CHECK_ONLY" = 1 ] && [ ! -c "${CTRL_TTY:-/dev/null}" ]; then
-		skip "нет управляющего порта"
+	elif [ "$CHECK_ONLY" = 1 ] && [ ! -c "$CTRL_TTY" ]; then
+		# Без подстановки /dev/null: он сам символьное устройство, и при пустом
+		# CTRL_TTY (модем ещё в storage-режиме — в --check modeswitch не делается,
+		# портам взяться неоткуда) проверка давала «порт есть», заход сваливался
+		# в AT-опрос и падал с [FAIL] «нет ни одного ttyUSB». Не поломка, а
+		# прямое следствие --check, и пугать ею не за что.
+		skip "нет управляющего порта — модем не в модемном режиме"
 	else
 		# Ждём ответа, а не спрашиваем один раз. Сразу после modeswitch устройство
 		# перечисляется заново: ttyUSB* уже созданы, а прошивка модема ещё не готова
