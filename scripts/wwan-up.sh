@@ -272,9 +272,25 @@ find_ncm_iface() {
 
 # RNDIS-интерфейс (MTS 81332FT / ZTE MF90 / Marvell PXA1802 и любые другие RNDIS-устройства):
 # класс wireless (e0/01/03) или comm (02/02/ff).
+#
+# 02/02/ff — не признак RNDIS сам по себе: ровно тот же дескриптор у управляющего
+# интерфейса CDC-ACM, и именно его отдаёт интерфейс 0 старых Huawei-свистков. На
+# E173s-1 (12d1:1c05) стадия опознавала 4-1:1.0 как RNDIS, грузила f515_rndis и
+# падала с «сетевой интерфейс не появился» ещё до ветки PPP — при полностью
+# исправном модеме. Поэтому Huawei в AT/PPP-режиме пропускаем: канал данных там
+# всегда PPP, RNDIS искать нечего.
+#
+# По смыслу это та же защита, что в find_ncm_iface, но опознать E173 по наличию
+# модемного порта ff/02/10 нельзя — у него ВСЕ интерфейсы ff/ff/ff, поэтому
+# отсекаем по PID, тем же списком, что и стадия «режим модема».
 find_rndis_iface() {
 	for i in /sys/bus/usb/devices/*:*; do
 		[ -f "$i/bInterfaceClass" ] || continue
+		if [ "$(cat "$i/../idVendor" 2>/dev/null)" = "12d1" ]; then
+			case "$(cat "$i/../idProduct" 2>/dev/null)" in
+			1506 | 1465 | 140c | 1c05 | 14ac) continue ;;
+			esac
+		fi
 		_cl=$(cat "$i/bInterfaceClass" 2>/dev/null)
 		_sc=$(cat "$i/bInterfaceSubClass" 2>/dev/null)
 		_pr=$(cat "$i/bInterfaceProtocol" 2>/dev/null)
@@ -1519,9 +1535,17 @@ else
 			sleep 1
 			i=$((i + 1))
 		done
-		find_hilink_iface || die "модуль f515_rndis загружен, а сетевой интерфейс не появился" \
-			"смотри dmesg на предмет f515_rndis"
-		ok "сетевой интерфейс $HILINK_IF (драйвер $HILINK_DRV)"
+		# Не die: стадия — догадка по дескрипторам, и ошибиться она может на любом
+		# свистке, чей интерфейс похож на RNDIS (см. find_rndis_iface). Ронять из-за
+		# неё весь подъём нельзя: ветка PPP ниже от RNDIS ничего не ждёт и поднимает
+		# модем сама. Загруженный впустую модуль вреда не делает — он просто ни к
+		# чему не привязался.
+		if find_hilink_iface; then
+			ok "сетевой интерфейс $HILINK_IF (драйвер $HILINK_DRV)"
+		else
+			warn "сетевой интерфейс не появился — это не RNDIS-модем, идём дальше"
+			say "      если модем всё же RNDIS, смотри dmesg на предмет f515_rndis"
+		fi
 	fi
 fi
 

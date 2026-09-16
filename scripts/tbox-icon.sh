@@ -6,7 +6,8 @@
 #   tbox-icon.sh auto                         запустить, если пользователь не отключил
 #   tbox-icon.sh status                       работает или нет + последние строки лога
 #   tbox-icon.sh signal                       разовый опрос модема, ничего не запуская
-#   tbox-icon.sh fake N                       показать фиксированные N палок (проверка)
+#   tbox-icon.sh fake N [аргументы TboxWire]  показать фиксированные N палок (проверка);
+#                                             например: fake 4 --reg 6
 #   tbox-icon.sh capable                      умеет ли эта голова показать иконку вообще
 #
 # Выключатель — файл state/icon со словом on/off внутри (а не «есть файл/нет файла»:
@@ -298,10 +299,14 @@ signal)
 fake)
 	shift
 	N=${1:-4}
+	[ $# -gt 0 ] && shift
 	need_jar
 	add_alias
 	echo "показываем фиксированные $N палок, Ctrl-C чтобы прекратить"
-	java_run --strength "$N"
+	# Хвост аргументов уходит в TboxWire как есть: без него документированный
+	# способ перебрать celluarRegisterStatus (`fake 4 --reg N`, см. genToReg в
+	# TboxWire.java) молча игнорировал --reg и показывал всегда одно и то же.
+	java_run --strength "$N" "$@"
 	;;
 
 capable)
