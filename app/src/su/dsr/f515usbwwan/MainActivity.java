@@ -57,6 +57,7 @@ public class MainActivity extends Activity {
         addAutostartButton();
         addSmsButton();
         addIconButton();
+        addWhitelistButton();
         addDnsButton();
         addVpnButton();
         addUrlButton("Интернетометр", SPEEDTEST_URL);
@@ -84,6 +85,7 @@ public class MainActivity extends Activity {
         append("Выключить     - остановить pppd");
         append("Автозапуск    - подъём после перезагрузки головы + слежение за связью");
         append("VPN           - совместимость с VPN-клиентами (VpnService)");
+        append("Белые списки  - доступны ли серверы телеметрии Evolute (по одной строке на сервер)");
         append("Интернетометр - открыть " + SPEEDTEST_URL + " (проверка интернета глазами)");
         append("автозапуск сейчас: " + (Autostart.isEnabled(this) ? "ВКЛЮЧЕН" : "выключен"));
 
@@ -107,6 +109,26 @@ public class MainActivity extends Activity {
                                 Keeper.startAutostart(MainActivity.this, true, p);
                             }
                         }
+                    }
+                });
+            }
+        }));
+    }
+
+    /**
+     * Проверка белых списков телеметрии: по очереди стучится в серверы Evolute из
+     * vega-mitm и показывает по строке на сервер, доступен он или нет. Работает
+     * внутри приложения (Java-сокеты), маршрут — тот же, что у Android-приложений,
+     * поэтому проверять лучше при поднятом модеме.
+     */
+    private void addWhitelistButton() {
+        buttonsRow.addView(button("Белые списки", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                runInBackground("> Проверка белых списков телеметрии ...", new Job() {
+                    @Override
+                    public void run(Keeper.Progress p) {
+                        WhitelistChecker.checkAll(p);
                     }
                 });
             }

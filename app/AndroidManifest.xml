@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="su.dsr.f515usbwwan"
-    android:versionCode="44"
-    android:versionName="4.12">
+    android:versionCode="45"
+    android:versionName="4.13">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="29" />
 

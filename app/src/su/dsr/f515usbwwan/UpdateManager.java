@@ -24,8 +24,17 @@ import java.net.URL;
 public class UpdateManager {
 
     private static final String TAG = "WWAN_UpdateManager";
+
+    // Основной источник обновлений — РФ-хостинг. GitHub из машины через российских
+    // операторов периодически недоступен (api.github.com не отвечает), поэтому проверка
+    // и загрузка больше не зависят от него: сначала свой сервер, GitHub — только резерв.
+    public static final String PRIMARY_LATEST_URL = "https://tm.dsr.su/f515/latest.json";
+
     public static final String GITHUB_REPO = "dsultanr/f515-usb-wwan";
     public static final String LATEST_RELEASE_URL = "https://api.github.com/repos/" + GITHUB_REPO + "/releases/latest";
+
+    private static final int CONNECT_TIMEOUT_MS = 10000;
+    private static final int READ_TIMEOUT_MS = 15000;
 
     public static class ReleaseInfo {
         public final String tagName;
@@ -63,81 +72,125 @@ public class UpdateManager {
     }
 
     /**
-     * Проверка наличия свежего релиза на GitHub.
+     * Проверка наличия свежего релиза. Сначала РФ-хостинг (основной источник), затем,
+     * если он недоступен, GitHub как резерв — из машины через российских операторов
+     * api.github.com периодически не отвечает, поэтому обновления не должны от него зависеть.
      */
     public static void check(final Context ctx, final CheckCallback callback) {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                HttpURLConnection conn = null;
+                String currentVer = getInstalledVersion(ctx);
+                ReleaseInfo release = null;
+                String source = null;
+
+                // 1) Основной источник — РФ-хостинг (latest.json).
                 try {
-                    String currentVer = getInstalledVersion(ctx);
-                    URL url = new URL(LATEST_RELEASE_URL);
-                    conn = (HttpURLConnection) url.openConnection();
-                    conn.setConnectTimeout(10000);
-                    conn.setReadTimeout(15000);
-                    conn.setRequestProperty("User-Agent", "F515-USB-WWAN-App");
-                    conn.setRequestProperty("Accept", "application/vnd.github.v3+json");
-
-                    int code = conn.getResponseCode();
-                    if (code != 200) {
-                        callback.onError("GitHub API вернул HTTP " + code);
-                        return;
-                    }
-
-                    BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-                    StringBuilder sb = new StringBuilder();
-                    String line;
-                    while ((line = br.readLine()) != null) {
-                        sb.append(line).append("\n");
-                    }
-                    br.close();
-
-                    JSONObject json = new JSONObject(sb.toString());
-                    String tagName = json.optString("tag_name", "");
-                    String title = json.optString("name", tagName);
-                    String body = json.optString("body", "");
-                    String releaseVer = tagName.startsWith("v") || tagName.startsWith("V") ? tagName.substring(1) : tagName;
-
-                    String apkUrl = null;
-                    long apkSize = 0;
-                    JSONArray assets = json.optJSONArray("assets");
-                    if (assets != null) {
-                        for (int i = 0; i < assets.length(); i++) {
-                            JSONObject asset = assets.getJSONObject(i);
-                            String name = asset.optString("name", "");
-                            if (name.endsWith(".apk")) {
-                                apkUrl = asset.optString("browser_download_url", null);
-                                apkSize = asset.optLong("size", 0);
-                                if (name.equalsIgnoreCase("F515UsbWwanApp.apk")) {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if (apkUrl == null) {
-                        callback.onError("В релизе " + tagName + " не найден APK-файл");
-                        return;
-                    }
-
-                    ReleaseInfo release = new ReleaseInfo(tagName, releaseVer, title, body, apkUrl, apkSize);
-                    boolean isNewer = isVersionNewer(releaseVer, currentVer);
-
-                    if (isNewer) {
-                        callback.onResult(true, release, currentVer, "Найдена новая версия: " + releaseVer);
-                    } else {
-                        callback.onResult(false, release, currentVer, "У вас установлена актуальная версия (" + currentVer + ")");
-                    }
-
+                    release = fetchRf(PRIMARY_LATEST_URL);
+                    source = "РФ-хостинг";
                 } catch (Exception e) {
-                    Log.e(TAG, "check failed", e);
-                    callback.onError("Ошибка проверки обновлений: " + e.getMessage());
-                } finally {
-                    if (conn != null) conn.disconnect();
+                    Log.w(TAG, "primary (RF) update source failed: " + e.getMessage());
+                }
+
+                // 2) Резерв — GitHub.
+                if (release == null) {
+                    try {
+                        release = fetchGithub(LATEST_RELEASE_URL);
+                        source = "GitHub (резерв)";
+                    } catch (Exception e) {
+                        Log.e(TAG, "github fallback failed", e);
+                        callback.onError("Не удалось проверить обновления: РФ-хостинг и GitHub недоступны ("
+                                + e.getMessage() + ")");
+                        return;
+                    }
+                }
+
+                boolean isNewer = isVersionNewer(release.versionName, currentVer);
+                if (isNewer) {
+                    callback.onResult(true, release, currentVer,
+                            "Найдена новая версия: " + release.versionName + " (источник: " + source + ")");
+                } else {
+                    callback.onResult(false, release, currentVer,
+                            "У вас актуальная версия (" + currentVer + "), источник: " + source);
                 }
             }
         }).start();
+    }
+
+    /** Разбор latest.json с РФ-хостинга. Формат наш, простой и плоский. */
+    private static ReleaseInfo fetchRf(String urlStr) throws Exception {
+        String bodyStr = httpGet(urlStr, "application/json");
+        JSONObject json = new JSONObject(bodyStr);
+        String tagName = json.optString("tag_name", "");
+        String version = json.optString("version",
+                tagName.startsWith("v") || tagName.startsWith("V") ? tagName.substring(1) : tagName);
+        String title = json.optString("name", tagName);
+        String body = json.optString("body", "");
+        String apkUrl = json.optString("apk_url", null);
+        long apkSize = json.optLong("size", 0);
+        if (apkUrl == null || apkUrl.isEmpty()) {
+            throw new Exception("в latest.json нет apk_url");
+        }
+        return new ReleaseInfo(tagName, version, title, body, apkUrl, apkSize);
+    }
+
+    /** Разбор ответа GitHub releases/latest (резервный источник). */
+    private static ReleaseInfo fetchGithub(String urlStr) throws Exception {
+        String bodyStr = httpGet(urlStr, "application/vnd.github.v3+json");
+        JSONObject json = new JSONObject(bodyStr);
+        String tagName = json.optString("tag_name", "");
+        String title = json.optString("name", tagName);
+        String body = json.optString("body", "");
+        String releaseVer = tagName.startsWith("v") || tagName.startsWith("V") ? tagName.substring(1) : tagName;
+
+        String apkUrl = null;
+        long apkSize = 0;
+        JSONArray assets = json.optJSONArray("assets");
+        if (assets != null) {
+            for (int i = 0; i < assets.length(); i++) {
+                JSONObject asset = assets.getJSONObject(i);
+                String name = asset.optString("name", "");
+                if (name.endsWith(".apk")) {
+                    apkUrl = asset.optString("browser_download_url", null);
+                    apkSize = asset.optLong("size", 0);
+                    if (name.equalsIgnoreCase("F515UsbWwanApp.apk")) {
+                        break;
+                    }
+                }
+            }
+        }
+        if (apkUrl == null) {
+            throw new Exception("в релизе " + tagName + " нет APK-файла");
+        }
+        return new ReleaseInfo(tagName, releaseVer, title, body, apkUrl, apkSize);
+    }
+
+    /** GET с таймаутами и проверкой HTTP 200. Возвращает тело ответа. */
+    private static String httpGet(String urlStr, String accept) throws Exception {
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(urlStr);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            conn.setReadTimeout(READ_TIMEOUT_MS);
+            conn.setRequestProperty("User-Agent", "F515-USB-WWAN-App");
+            conn.setRequestProperty("Accept", accept);
+
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                throw new Exception("HTTP " + code + " от " + url.getHost());
+            }
+            BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append("\n");
+            }
+            br.close();
+            return sb.toString();
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
     }
 
     /**
