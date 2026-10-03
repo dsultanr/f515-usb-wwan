@@ -60,6 +60,7 @@ public class MainActivity extends Activity {
         addWhitelistButton();
         addDnsButton();
         addVpnButton();
+        addHotspotButton();
         addUrlButton("Интернетометр", SPEEDTEST_URL);
         addFormatButton();
         HorizontalScrollView buttonsScroll = new HorizontalScrollView(this);
@@ -85,6 +86,7 @@ public class MainActivity extends Activity {
         append("Выключить     - остановить pppd");
         append("Автозапуск    - подъём после перезагрузки головы + слежение за связью");
         append("VPN           - совместимость с VPN-клиентами (VpnService)");
+        append("Точка доступа - раздавать интернет модема в точку доступа Android");
         append("Белые списки  - доступны ли серверы телеметрии Evolute (по одной строке на сервер)");
         append("Интернетометр - открыть " + SPEEDTEST_URL + " (проверка интернета глазами)");
         append("автозапуск сейчас: " + (Autostart.isEnabled(this) ? "ВКЛЮЧЕН" : "выключен"));
@@ -797,6 +799,82 @@ public class MainActivity extends Activity {
         }
         b.setNeutralButton("Отмена", null);
         b.show();
+    }
+
+    /**
+     * Интернет модема для клиентов точки доступа Android. Сам по себе Android раздаёт
+     * в «фантомную сеть TBOX», а не в модем, — режим добавляет пересылку и NAT на
+     * интерфейс модема (свои помеченные правила, чужие не трогаются).
+     */
+    private void addHotspotButton() {
+        buttonsRow.addView(button("Точка доступа", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (busy) return;
+                setBusy(true);
+                append("");
+                append("> Точка доступа: читаю состояние...");
+                background(new Runnable() {
+                    @Override
+                    public void run() {
+                        final String out = Keeper.run(MainActivity.this, "--hotspot-status", null);
+                        ui.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                setBusy(false);
+                                showHotspotDialog(out);
+                            }
+                        });
+                    }
+                });
+            }
+        }));
+    }
+
+    private void showHotspotDialog(String status) {
+        final boolean modeOn = value(status, "hotspot_mode").equals("1");
+        String rules = value(status, "hotspot_rules");
+        String ap = value(status, "hotspot_ap");
+
+        StringBuilder msg = new StringBuilder();
+        msg.append("Инет для точки доступа: раздавать интернет USB-модема устройствам, ")
+                .append("подключённым к точке доступа головы.\n\n");
+        msg.append("Настройка: ").append(modeOn ? "ВКЛЮЧЕНО" : "выключено").append('\n');
+        msg.append("Правил в ядре: ").append(rules.isEmpty() ? "0" : rules).append('\n');
+        msg.append("Точка доступа: ").append(ap.isEmpty() ? "не поднята" : ap).append('\n');
+        msg.append("\nНастройка сохраняется и применяется при каждом подъёме модема. ")
+                .append("Саму точку доступа включай в настройках Android.");
+
+        AlertDialog.Builder b = new AlertDialog.Builder(this)
+                .setTitle("Инет для точки доступа")
+                .setMessage(msg.toString());
+        if (modeOn) {
+            b.setNegativeButton("Выключить", new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface d, int which) {
+                    applyHotspot(false);
+                }
+            });
+        } else {
+            b.setPositiveButton("Включить", new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface d, int which) {
+                    applyHotspot(true);
+                }
+            });
+        }
+        b.setNeutralButton("Отмена", null);
+        b.show();
+    }
+
+    private void applyHotspot(final boolean enable) {
+        final String arg = enable ? "--hotspot=on" : "--hotspot=off";
+        runInBackground("> Точка доступа: " + (enable ? "включаю" : "выключаю") + " раздачу...", new Job() {
+            @Override
+            public void run(Keeper.Progress p) {
+                Keeper.run(MainActivity.this, arg, p);
+            }
+        });
     }
 
     private void applyVpn(final boolean enable) {

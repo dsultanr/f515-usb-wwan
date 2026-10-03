@@ -30,6 +30,9 @@
 #                           netd, чтобы работали VPN-клиенты на VpnService
 #   wwan-up.sh --vpn=off    вернуть правила вендора как было
 #   wwan-up.sh --vpn-status показать текущее состояние режима VPN
+#   wwan-up.sh --hotspot    раздавать интернет модема в точку доступа Android
+#   wwan-up.sh --hotspot=off  выключить раздачу (снять свои правила)
+#   wwan-up.sh --hotspot-status  показать состояние раздачи
 #   wwan-up.sh --modcheck   отчёт по модулям ядра: чем собраны наши .ko, что за
 #                           сборка ядра на голове, сойдётся ли ABI (и почему нет)
 #
@@ -81,6 +84,13 @@ DNS_AUTO_LAST=$STATE/dns-auto
 DNS_WANT=${WWAN_DNS:-}
 [ -n "$DNS_WANT" ] || DNS_WANT=$(cat "$DNS_SETTING" 2>/dev/null)
 CHECK_HOST=${WWAN_CHECK_HOST:-77.88.8.8}
+# MTU интерфейса модема. Прошивка отключает PMTUD для всей системы
+# (/vendor/bin/init.ncm.config.sh: ip_no_pmtu_disc=1, tcp_base_mss=1460, сборка
+# фрагментов выключена), поэтому при драйверных 1500 и пути с меньшим MTU (часть
+# операторов, роуминг, 464XLAT, туннели поверх модема) большие TCP-отправки молча
+# висят до таймаута. 1280 — минимум IPv6, его пропускает практически любой путь;
+# заодно MSS, объявляемый серверу, падает до 1240 и большие пакеты не ходят в обе стороны.
+WAN_MTU=${WWAN_MTU:-1280}
 # Совместимость с VPN-клиентами на VpnService (HAPP, v2rayNG, WireGuard и пр.).
 # Выключено по умолчанию: режим трогает правила вендора, а не только свои.
 # Зачем это нужно и что именно двигается — см. vpn_rules_apply и docs/app-network.md.
@@ -88,6 +98,20 @@ VPN_SETTING=$STATE/vpn
 VPN_WANT=${WWAN_VPN:-}
 [ -n "$VPN_WANT" ] || VPN_WANT=$(cat "$VPN_SETTING" 2>/dev/null)
 VPN_MODE=${VPN_WANT:-0}
+# Интернет модема для клиентов точки доступа Android. Выключено по умолчанию.
+# Android про модем не знает и раздаёт «в фантомную сеть TBOX» (vlan72): пускает
+# пересылку и делает NAT только на её интерфейс, а пакеты по правилу вендора
+# «from all lookup main» уходят в модем — и там их режет FORWARD (политика DROP)
+# и не маскирует никто. Режим добавляет ровно эти два недостающих куска: ACCEPT
+# в OEM-цепочке oem_fwd (netd её не трогает) и MASQUERADE на выходе в модем.
+# Все правила помечены комментарием wwan-hotspot и снимаются только по нему.
+HOTSPOT_SETTING=$STATE/hotspot
+HOTSPOT_WANT=${WWAN_HOTSPOT:-}
+[ -n "$HOTSPOT_WANT" ] || HOTSPOT_WANT=$(cat "$HOTSPOT_SETTING" 2>/dev/null)
+HOTSPOT_MODE=${HOTSPOT_WANT:-0}
+HS_TAG=wwan-hotspot
+# Интерфейсы, которые Android делает точкой доступа (tetherableWifiRegexs).
+HS_AP_IFS="wlan+ swlan+ softap+ wifi_br+ ap+"
 # Новое место вендорского catch-all'а. Ниже всех правил netd, которые нас
 # волнуют (VPN 13000/21000, default network 23000), но выше unreachable (32000):
 # так main остаётся последним резервом для трафика, которому netd не нашёл сети,
@@ -109,6 +133,9 @@ DO_RECONNECT=0
 DO_VPN=0
 VPN_SET=0
 VPN_STATUS_ONLY=0
+DO_HOTSPOT=0
+HOTSPOT_SET=0
+HOTSPOT_STATUS_ONLY=0
 for a in "$@"; do
 	case "$a" in
 	-c | --check)     CHECK_ONLY=1 ;;
@@ -126,7 +153,10 @@ for a in "$@"; do
 	--vpn-status | --vpn=status) DO_VPN=1; VPN_STATUS_ONLY=1 ;;
 	--vpn | --vpn=on) VPN_MODE=1; DO_VPN=1; VPN_SET=1 ;;
 	--vpn=off)        VPN_MODE=0; DO_VPN=1; VPN_SET=1 ;;
-	-h | --help)      sed -n '2,36p' "$0"; exit 0 ;;
+	--hotspot-status | --hotspot=status) DO_HOTSPOT=1; HOTSPOT_STATUS_ONLY=1 ;;
+	--hotspot | --hotspot=on) HOTSPOT_MODE=1; DO_HOTSPOT=1; HOTSPOT_SET=1 ;;
+	--hotspot=off)    HOTSPOT_MODE=0; DO_HOTSPOT=1; HOTSPOT_SET=1 ;;
+	-h | --help)      sed -n '2,39p' "$0"; exit 0 ;;
 	*) echo "неизвестный аргумент: $a (см. --help)"; exit 64 ;;
 	esac
 done
@@ -1182,6 +1212,59 @@ vpn_shadow_warn() {
 # Отчёт по модулям ядра (--modcheck): всё, по чему ядро решает, брать модуль или
 # нет. Ничего не меняет и ничего не грузит — это то, что имеет смысл прислать,
 # когда на чужой голове insmod отказал (или, наоборот, прошёл, а драйвера нет).
+# ------------------------------------------------ раздача в точку доступа --
+# Снять все свои правила раздачи (по метке), где бы они ни висели и на какой бы
+# интерфейс модема ни указывали. Чужие правила не трогаются.
+hotspot_clean() {
+	for _hc in "filter oem_fwd" "nat POSTROUTING" "mangle FORWARD"; do
+		set -- $_hc
+		iptables -w 10 -t "$1" -S "$2" 2>/dev/null | grep -e "--comment $HS_TAG" |
+			sed 's/^-A /-D /' | while read -r _hr; do
+				# shellcheck disable=SC2086
+				do_it iptables -w 10 -t "$1" $_hr
+			done
+	done
+}
+
+# Сколько своих правил раздачи сейчас стоит (0 — режим не применён).
+hotspot_rules() {
+	{
+		iptables -w 10 -S oem_fwd 2>/dev/null
+		iptables -w 10 -t nat -S POSTROUTING 2>/dev/null
+		iptables -w 10 -t mangle -S FORWARD 2>/dev/null
+	} | grep -c -e "--comment $HS_TAG"
+}
+
+# Интерфейс точки доступа, если она сейчас поднята (по выводу tethering).
+hotspot_ap_iface() {
+	dumpsys tethering 2>/dev/null | sed -n 's/^ *\([a-z_0-9]*\) - TetheredState.*/\1/p' | head -1
+}
+
+# Поставить правила раздачи на интерфейс модема $1. Сначала снимаем старые —
+# модем мог переподняться другим интерфейсом (ppp0 -> usb0), и правила на
+# прежний остались бы висеть.
+hotspot_apply() {
+	_hw=$1
+	[ -n "$_hw" ] || { warn "раздача: интерфейс модема неизвестен — применю при подъёме"; return 0; }
+	iptables -w 10 -S oem_fwd >/dev/null 2>&1 ||
+		{ warn "раздача: нет цепочки oem_fwd — эта прошивка не поддерживается"; return 1; }
+	hotspot_clean
+	for _ap in $HS_AP_IFS; do
+		do_it iptables -w 10 -A oem_fwd -i "$_ap" -o "$_hw" \
+			-m comment --comment "$HS_TAG" -j ACCEPT
+		do_it iptables -w 10 -A oem_fwd -i "$_hw" -o "$_ap" \
+			-m state --state ESTABLISHED,RELATED -m comment --comment "$HS_TAG" -j ACCEPT
+	done
+	# Пакеты с собственным адресом модема MASQUERADE оставляет как есть, поэтому
+	# одно правило на выход без отбора по источнику безопасно и для своих сокетов.
+	do_it iptables -w 10 -t nat -A POSTROUTING -o "$_hw" \
+		-m comment --comment "$HS_TAG" -j MASQUERADE
+	# MSS для клиентов — по MTU маршрута через модем (см. WAN_MTU).
+	do_it iptables -w 10 -t mangle -A FORWARD -o "$_hw" -p tcp --tcp-flags SYN,RST SYN \
+		-m comment --comment "$HS_TAG" -j TCPMSS --clamp-mss-to-pmtu
+	ok "раздача в точку доступа: пересылка и NAT на $_hw включены"
+}
+
 mod_diag() {
 	_md_kr=$(uname -r)
 	say "== модули ядра"
@@ -1327,6 +1410,37 @@ if [ "$DO_VPN" = 1 ] && [ "$DO_SYSTEM" = 0 ]; then
 		vpn_rules_restore 'ip -6' IPv6
 		say ""
 		say "Настройка сохранена: режим VPN выключен."
+	fi
+	exit 0
+fi
+
+# Отдельный короткий режим раздачи: запомнить настройку и сразу применить/снять
+# на уже поднятом модеме. С --system сюда не заходим — там своя стадия.
+if [ "$DO_HOTSPOT" = 1 ] && [ "$DO_SYSTEM" = 0 ]; then
+	if [ "$HOTSPOT_STATUS_ONLY" = 1 ]; then
+		_hs_n=$(hotspot_rules)
+		_hs_ap=$(hotspot_ap_iface)
+		say "раздача в точку доступа: $([ "$HOTSPOT_MODE" = 1 ] && echo включена || echo выключена)"
+		say "правил в ядре: $_hs_n"
+		say "точка доступа: ${_hs_ap:-не поднята}"
+		echo "hotspot_mode=$HOTSPOT_MODE"
+		echo "hotspot_rules=$_hs_n"
+		echo "hotspot_ap=${_hs_ap:-}"
+		exit 0
+	fi
+
+	stage "раздача интернета в точку доступа"
+	if [ "$HOTSPOT_SET" = 1 ]; then
+		mkdir -p "$STATE" 2>/dev/null
+		echo "$HOTSPOT_MODE" >"$HOTSPOT_SETTING" || die "не смог записать $HOTSPOT_SETTING" "проверь права на $STATE"
+	fi
+	if [ "$HOTSPOT_MODE" = 1 ]; then
+		hotspot_apply "$(cat "$STATE/wan-iface" 2>/dev/null)" || exit 1
+		say ""
+		say "Настройка сохранена ($HOTSPOT_SETTING) и будет применяться при каждом подъёме."
+	else
+		hotspot_clean
+		ok "раздача в точку доступа выключена, свои правила сняты"
 	fi
 	exit 0
 fi
@@ -1890,7 +2004,7 @@ if [ "$MODE" = ppp ]; then
 			APN="$APN" WWAN_DIAL="$DIAL" setsid pppd "$MODEM_TTY" 115200 \
 				nodetach noauth nodefaultroute noipdefault \
 				ipcp-accept-local ipcp-accept-remote novj novjccomp local \
-				lcp-echo-interval 30 lcp-echo-failure 4 \
+				lcp-echo-interval 30 lcp-echo-failure 4 mtu "$WAN_MTU" mru "$WAN_MTU" \
 				$_auth logfile "$PPP_LOG" connect "$DIAL_SH" \
 				</dev/null >/dev/null 2>&1 &
 			say "   pppd запущен на $MODEM_TTY (APN $APN)"
@@ -1946,6 +2060,15 @@ stage "маршруты и проверка связи"
 if [ -z "$ADDR" ] && [ "$CHECK_ONLY" = 1 ]; then
 	skip "$WAN_IF не поднят"
 else
+	# MTU — одним местом для всех типов модема (PPP уже договорился о нём через
+	# опции pppd, но после переподключения/старого pppd подстрахуемся здесь же).
+	_mtu=$(cat "/sys/class/net/$WAN_IF/mtu" 2>/dev/null)
+	if [ "$_mtu" = "$WAN_MTU" ]; then
+		ok "MTU $WAN_IF = $WAN_MTU"
+	else
+		do_it ip link set "$WAN_IF" mtu "$WAN_MTU" &&
+			ok "MTU $WAN_IF: ${_mtu:-?} -> $WAN_MTU"
+	fi
 	add_default "$TABLE" 10
 	# Сначала снять старые, потом поставить свои на фиксированный приоритет —
 	# иначе они продолжат уползать вниз с каждым запуском.
@@ -2057,6 +2180,16 @@ if [ "$DO_SYSTEM" = 1 ]; then
 	# наружу обычным путём. Здесь же применяется кастомный DNS — подробности,
 	# почему другого места для него нет, в комментарии к dns_nat.
 	dns_nat "$DNS"
+
+	# ------------------------------------------- раздача в точку доступа --
+	# Выключено — снимаем свои правила (если остались от прошлого включения),
+	# включено — ставим заново на текущий интерфейс модема.
+	if [ "$HOTSPOT_MODE" = 1 ]; then
+		hotspot_apply "$WAN_IF" || true
+	elif [ "$(hotspot_rules)" != 0 ]; then
+		hotspot_clean
+		ok "раздача в точку доступа выключена, свои правила сняты"
+	fi
 
 	# ---------------------------------------------- совместимость с VpnService --
 	if [ "$VPN_MODE" = 1 ]; then
