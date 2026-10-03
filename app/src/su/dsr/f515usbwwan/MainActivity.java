@@ -16,6 +16,7 @@ import android.view.MenuItem;
 import android.view.View;
 import android.widget.Button;
 import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -32,6 +33,7 @@ import java.util.List;
 public class MainActivity extends Activity {
 
     private static final String SPEEDTEST_URL = "https://internet.yandex.ru";
+    private static final String DONATE_URL = "https://pay.cloudtips.ru/p/aa2fce54";
 
     private TextView log;
     private LinearLayout buttonsRow;
@@ -65,7 +67,16 @@ public class MainActivity extends Activity {
         addFormatButton();
         HorizontalScrollView buttonsScroll = new HorizontalScrollView(this);
         buttonsScroll.addView(buttonsRow);
-        root.addView(buttonsScroll);
+
+        // Верхняя панель: слева кнопки, справа QR-код для доната (как в F515YMapsSpeedup)
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.TOP);
+        header.addView(buttonsScroll, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        header.addView(donateBox(), new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        root.addView(header);
 
         log = new TextView(this);
         log.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
@@ -92,6 +103,51 @@ public class MainActivity extends Activity {
         append("автозапуск сейчас: " + (Autostart.isEnabled(this) ? "ВКЛЮЧЕН" : "выключен"));
 
         checkServerVersionAsync();
+    }
+
+    /** QR-код для поддержки проекта: картинка + подпись, по нажатию — страница доната. */
+    private View donateBox() {
+        LinearLayout qrBox = new LinearLayout(this);
+        qrBox.setOrientation(LinearLayout.VERTICAL);
+        qrBox.setGravity(Gravity.CENTER_HORIZONTAL);
+        qrBox.setPadding(dp(12), 0, 0, dp(6));
+
+        ImageView qrView = new ImageView(this);
+        qrView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        qrView.setBackgroundColor(Color.WHITE);
+        qrView.setPadding(dp(2), dp(2), dp(2), dp(2));
+        int qrResId = getResources().getIdentifier("qr_donate", "drawable", getPackageName());
+        if (qrResId != 0) {
+            qrView.setImageResource(qrResId);
+        }
+        int qrSize = dp(100);
+        qrView.setLayoutParams(new LinearLayout.LayoutParams(qrSize, qrSize));
+        qrBox.addView(qrView);
+
+        TextView qrLabel = new TextView(this);
+        qrLabel.setText("Поддержать проект");
+        qrLabel.setTextColor(Color.LTGRAY);
+        qrLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+        qrLabel.setGravity(Gravity.CENTER);
+        qrLabel.setPadding(0, dp(4), 0, 0);
+        qrBox.addView(qrLabel);
+
+        View.OnClickListener donateClick = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(DONATE_URL));
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(intent);
+                } catch (Throwable t) {
+                    append("! Ошибка открытия ссылки: " + t.getMessage());
+                }
+            }
+        };
+        qrBox.setOnClickListener(donateClick);
+        qrView.setOnClickListener(donateClick);
+        qrLabel.setOnClickListener(donateClick);
+        return qrBox;
     }
 
     // ------------------------------------------------------------------ кнопки --
