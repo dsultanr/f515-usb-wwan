@@ -423,13 +423,9 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    /**
-     * Иконка сотовой сети в статус-баре. Как и автозапуск, это не разовое действие, а
-     * состояние, которое живёт само по себе, поэтому сначала спрашиваем голову, что там
-     * сейчас, и только потом показываем выбор.
-     */
+    /** LBS: состояние передачи данных соты и сохранённый выбор пользователя. */
     private void addCellsButton() {
-        buttonsRow.addView(button("Данные соты", new View.OnClickListener() {
+        buttonsRow.addView(button("LBS", new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if (busy) return;
                 setBusy(true);
@@ -454,12 +450,12 @@ public class MainActivity extends Activity {
                                             detail += "\nНавигатор запрашивает данные соты.";
                                     } catch (Exception ignored) { }
                                 }
-                                new AlertDialog.Builder(MainActivity.this).setTitle("Данные соты: " + (enabled ? "включено" : "выключено"))
+                                new AlertDialog.Builder(MainActivity.this).setTitle("LBS: " + (enabled ? "включён" : "выключен"))
                                         .setMessage("Передача данных LTE-соты USB-модема в Яндекс Навигатор как дополнительного источника геолокации. "
-                                                + "После перезагрузки запускается вместе с автозапуском модема." + (enabled ? detail : ""))
+                                                + "Включён по умолчанию. После перезагрузки запускается вместе с автозапуском модема." + (enabled ? detail : ""))
                                         .setPositiveButton(enabled ? "Выключить" : "Включить", new DialogInterface.OnClickListener() {
                                             @Override public void onClick(DialogInterface d, int which) {
-                                                runInBackground("> Данные соты...", new Job() {
+                                                runInBackground("> LBS...", new Job() {
                                                     @Override public void run(Keeper.Progress p) {
                                                         Keeper.runCells(MainActivity.this, enabled ? "disable" : "enable", p);
                                                     }

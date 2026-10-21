@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# Direct cell delivery is opt-in and independent of the icon. No Navigator launch/kill.
+# LBS is enabled by default and independent of the icon. No Navigator launch/kill.
 set -u
 umask 077
 DIR=$(cd "$(dirname "$0")" && pwd)
@@ -7,6 +7,14 @@ ROOT=/dev/wwan-cells
 [ "$(id -u)" = 0 ] || exit 1
 mkdir -p "$DIR/state" "$ROOT/private"
 chmod 0755 "$ROOT" "$DIR" "$DIR/state"
+# Initialize only an absent preference. Publish atomically without replacing a
+# concurrent user choice, including an explicit OFF from a development build.
+if [ ! -e "$DIR/state/cells" ]; then
+    echo on >"$DIR/state/.cells-default.$$" || exit 1
+    ln "$DIR/state/.cells-default.$$" "$DIR/state/cells" 2>/dev/null || true
+    rm -f "$DIR/state/.cells-default.$$"
+    [ -e "$DIR/state/cells" ] || exit 1
+fi
 chmod 0600 "$ROOT/daemon.lock" "$ROOT/stderr" 2>/dev/null || true
 chown 0:1001 "$ROOT/private"
 chmod 0750 "$ROOT/private"
@@ -16,7 +24,7 @@ case "${1:-status}" in
         : >"$ROOT/disabled"
         echo off >"$DIR/state/cells"
         rm -f "$ROOT/lease" "$ROOT/private/cell.json"
-        echo 'Данные соты выключены; адаптеры отключатся в течение 15 секунд.'
+        echo 'LBS выключен; адаптеры отключатся в течение 15 секунд.'
         exit 0 ;;
     status)
         echo "enabled=$(cat "$DIR/state/cells" 2>/dev/null || echo off)"
@@ -41,10 +49,10 @@ case "${1:-status}" in
 esac
 [ ! -f "$ROOT/maintenance" ] || exit 0
 if [ "$(getprop ro.build.version.sdk)" != 30 ]; then
-    echo 'Передача данных соты поддерживает Android 11.'; exit 1
+    echo 'LBS поддерживает Android 11.'; exit 1
 fi
 case "$(getprop ro.product.cpu.abilist64)" in *arm64-v8a*) ;; *)
-    echo 'Передача данных соты требует arm64.'; exit 1 ;; esac
+    echo 'LBS требует arm64.'; exit 1 ;; esac
 [ "$(cat "$DIR/state/cells" 2>/dev/null)" = on ] || exit 0
 p=$(cat "$ROOT/pid" 2>/dev/null || true)
 case "$p" in ''|*[!0-9]*) ;; *)
@@ -68,10 +76,10 @@ while [ "$i" -lt 10 ]; do
     p=$(cat "$ROOT/pid" 2>/dev/null || true)
     case "$p" in ''|*[!0-9]*) ;; *)
         if [ -r "/proc/$p/cmdline" ] && [ "$(tr '\000' '\n' <"/proc/$p/cmdline" 2>/dev/null | head -1)" = wwan-cells ]; then
-            echo "Служба данных соты запущена; готовность подключения — в status."; exit 0
+            echo "Служба LBS запущена; готовность подключения — в status."; exit 0
         fi ;;
     esac
     sleep 1; i=$((i + 1))
 done
-echo 'Служба данных соты не запустилась.'
+echo 'Служба LBS не запустилась.'
 exit 1

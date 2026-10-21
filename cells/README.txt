@@ -1,15 +1,16 @@
-USB modem cells -> Android Telephony (development branch)
-========================================================
+USB modem cells -> Android Telephony (LBS)
+=========================================
 
-Implemented in feat/lbs-cell-source, candidate WWAN 4.16-dev1. Not a public release.
+Included in WWAN 4.16, developed in feat/lbs-cell-source.
 Tested target: F515, Android 11 arm64; Navigator 31.1.3 (739706920), Huawei E3272 LTE.
 This passes real serving-cell information to Navigator. It does not calculate or
 inject coordinates and does not establish improved accuracy or faster first fix.
 
-Opt-in and startup
------------------
-The WWAN app has a "Данные соты" control; default is OFF. The persistent preference
-is state/cells. When enabled, wwan-cells.sh starts one root app_process coordinator.
+Preference and startup
+----------------------
+The WWAN app has an "LBS" control; default is ON. The persistent preference
+is state/cells. An absent preference is initialized atomically; an explicit OFF
+is preserved across upgrades. When enabled, wwan-cells.sh starts one root app_process coordinator.
 The existing WWAN boot watchdog starts/checks it as part of modem autostart.
 No foreground Navigator launch, force-stop, MapKit reset or private Yandex method
 hook is part of the payload. An already running Navigator which skipped telephony

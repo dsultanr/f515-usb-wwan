@@ -282,7 +282,7 @@ public class Keeper {
                 if (!paused) {
                     String out = adb.shell("if [ -f " + CELLS + " ]; then sh " + CELLS
                             + " pause; else true; fi; echo pause_rc=$?");
-                    if (!out.contains("pause_rc=0")) throw new java.io.IOException("Не удалось приостановить данные соты");
+                    if (!out.contains("pause_rc=0")) throw new java.io.IOException("Не удалось приостановить LBS");
                     paused = true;
                 }
                 line(progress, sb, "  " + assetName + ": обновляю (" + data.length + " Б)...");

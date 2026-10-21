@@ -4,7 +4,7 @@ import java.nio.channels.*;
 import java.util.*;
 import org.json.*;
 
-/** Opt-in coordinator: Toolbox -> phone Binder ACK -> client -> observed request. */
+/** Cell coordinator: Toolbox -> phone Binder ACK -> client -> observed request. */
 public final class CellDaemon {
     static File dir;
     static String library;
