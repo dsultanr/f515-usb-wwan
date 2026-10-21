@@ -20,3 +20,8 @@ modules/**/*.mod
 modules/**/*.mod.c
 modules/**/.*.cmd
 modules/**/modules.order
+
+# LBS prototype artifacts and private live modem observations
+cells/build/
+tests/results/
+tests/android/build/
