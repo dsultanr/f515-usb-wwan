@@ -23,6 +23,8 @@
 #                           упала именно на загрузке модуля (см. docs/autostart.md)
 #   wwan-up.sh --wifi-prio  только пересчитать приоритет Wi-Fi над модемом в main
 #                           и выйти; молчит, если менять нечего (зовёт watchdog)
+#   wwan-up.sh --system-health  проверить маршруты/DNS HiLink для приложений,
+#                           без изменения сети; код 0 — исправно, 1 — нужна настройка
 #   wwan-up.sh --dns        показать, какой DNS выдаётся приложениям
 #   wwan-up.sh --dns=1.1.1.1  запомнить кастомный DNS и применить его сейчас
 #   wwan-up.sh --dns=auto   вернуться к DNS оператора/модема (см. docs/app-network.md)
@@ -126,6 +128,7 @@ DO_SYSTEM=0
 DO_DOWN=0
 BOOT_MODE=0
 DO_WIFI_PRIO=0
+DO_SYSTEM_HEALTH=0
 DO_DNS=0
 DO_MODCHECK=0
 DNS_SET=0
@@ -144,6 +147,7 @@ for a in "$@"; do
 	--down)           DO_DOWN=1 ;;
 	--boot)           BOOT_MODE=1 ;;
 	--wifi-prio)      DO_WIFI_PRIO=1 ;;
+	--system-health)  DO_SYSTEM_HEALTH=1; CHECK_ONLY=1 ;;
 	--modcheck)       DO_MODCHECK=1 ;;
 	--dns)            DO_DNS=1 ;;
 	# Значение с аргументом главнее и wwan.conf, и файла: человек только что
@@ -1000,6 +1004,76 @@ add_default() {
 	fi
 }
 
+# Exact route check: a surviving device name alone does not prove that its
+# gateway/metric/link state is still correct after USB or netd reconfiguration.
+default_matches() {
+	ip route show table "$1" 2>/dev/null | awk -v iface="$WAN_IF" -v gw="$GW" -v metric="$2" '
+		$1 == "default" {
+			d = ""; g = ""; m = "0"; bad = 0
+			for (i = 1; i <= NF; i++) {
+				if ($i == "dev") d = $(i+1)
+				if ($i == "via") g = $(i+1)
+				if ($i == "metric") m = $(i+1)
+				if ($i == "linkdown" || $i == "dead") bad = 1
+			}
+			if (d == iface && g == gw && m == metric && !bad) found = 1
+		}
+		END { exit !found }'
+}
+
+# Read-only health of the Android-side HiLink configuration. ping -I uses our
+# oif rule and can pass while main/Tbox routes or DNS NAT have disappeared.
+# The snapshot is data, never shell input; a stale/missing snapshot requests the
+# same non-reconnect setup as the UI button, which records the current values.
+system_health() {
+	WAN_IF=$(cat "$STATE/wan-iface" 2>/dev/null)
+	[ -n "$WAN_IF" ] || { echo 'WAN-интерфейс неизвестен'; return 1; }
+	find_hilink_iface && [ "$HILINK_IF" = "$WAN_IF" ] || {
+		echo 'прежний USB-сетевой интерфейс не найден'; return 1;
+	}
+	ADDR=$(iface_addr "$WAN_IF")
+	IFS=' ' read -r _sh_if _sh_idx _sh_addr GW _sh_dns <"$STATE/system-uplink" 2>/dev/null || {
+		echo 'нет сохранённых параметров системной сети'; return 1;
+	}
+	[ "$_sh_if" = "$WAN_IF" ] && [ -n "$ADDR" ] && [ "$_sh_addr" = "$ADDR" ] &&
+		[ "$_sh_idx" = "$(cat "/sys/class/net/$WAN_IF/ifindex" 2>/dev/null)" ] &&
+		is_ipv4 "$GW" && is_ipv4 "$_sh_dns" || {
+		echo 'изменились интерфейс или адрес модема'; return 1;
+	}
+	default_matches "$TABLE" 10 || { echo 'нет актуального маршрута USB-модема'; return 1; }
+	default_matches main 20 || { echo 'нет актуального резервного маршрута в main'; return 1; }
+	dns_pick "$_sh_dns"
+	tbox_net
+	[ -n "$TB_SRC" ] || { echo 'ожидание адреса сети приложений Tbox'; return 1; }
+	default_matches "$TB_IF" 5 || { echo 'нет актуального маршрута сети приложений Tbox'; return 1; }
+	if [ "$VPN_MODE" = 1 ]; then
+		[ -z "$(vpn_vendor_prefs ip)" ] || { echo 'сбросились правила совместимости VPN'; return 1; }
+		if ip route show table "$TB_IF" | grep '^default' | grep -qv " dev $WAN_IF "; then
+			echo 'в Tbox вернулся посторонний default при включённом режиме VPN'; return 1
+		fi
+	fi
+	[ "$TB_DNS" != "$DNS" ] || return 0
+	_sh_active=$(dns_nat_active)
+	if [ -n "$_sh_active" ] && [ "$_sh_active" != "$DNS" ]; then
+		echo 'DNS DNAT указывает на прежний сервер'; return 1
+	fi
+	if [ "$DNS_IS_CUSTOM" = 0 ] && [ -z "$_sh_active" ] && dns_answers "$TB_DNS"; then
+		return 0
+	fi
+	for _sh_proto in udp tcp; do
+		iptables -w 10 -t nat -C OUTPUT -d "$TB_DNS" -p "$_sh_proto" --dport 53 \
+			-j DNAT --to-destination "$DNS:53" 2>/dev/null || {
+			echo "нет актуального DNS DNAT ($_sh_proto)"; return 1;
+		}
+	done
+	for _sh_out in "$WAN_IF" 'tun+'; do
+		iptables -w 10 -t nat -C POSTROUTING -s "$TB_SRC" -o "$_sh_out" -j MASQUERADE 2>/dev/null || {
+			echo "нет актуального MASQUERADE ($_sh_out)"; return 1;
+		}
+	done
+	return 0
+}
+
 # ------------------------------------------------ свои правила в таблицу WAN --
 # Как таблица проекта называется в выводе `ip rule show`. Полагаться на rt_tables
 # нельзя: на голове /etc/iproute2/rt_tables нет вовсе, а /data/misc/net/rt_tables
@@ -1314,6 +1388,11 @@ fi
 if [ "$DO_WIFI_PRIO" = 1 ]; then
 	wifi_priority
 	exit 0
+fi
+
+if [ "$DO_SYSTEM_HEALTH" = 1 ]; then
+	system_health
+	exit $?
 fi
 
 # -------------------------------------------------------------------- --dns --
@@ -2098,7 +2177,7 @@ if [ "$DO_SYSTEM" = 1 ]; then
 	# резерва не будет — падать станет некуда ровно тогда, когда это нужно.
 	_alien=$(echo "$_cur" | grep '^default' |
 		grep -v "dev $WAN_IF " | grep -v "dev wlan[0-9]* metric $WIFI_METRIC")
-	if echo "$_cur" | grep -q "dev $WAN_IF "; then
+	if default_matches main 20; then
 		skip "в main уже default через $WAN_IF"
 	elif [ -n "$_alien" ]; then
 		warn "в main уже есть чужой default: $_alien"
@@ -2139,7 +2218,7 @@ if [ "$DO_SYSTEM" = 1 ]; then
 
 	if [ -z "$TB_SRC" ]; then
 		warn "у $TB_IF нет адреса — эта сеть сейчас не активна, пропускаю"
-	elif ip route show table "$TB_IF" 2>/dev/null | grep -q "^default.* dev $WAN_IF" &&
+	elif default_matches "$TB_IF" 5 &&
 		! ip route show table "$TB_IF" 2>/dev/null | grep '^default' | grep -qv " dev $WAN_IF "; then
 		skip "таблица $TB_IF уже указывает на $WAN_IF"
 	else
@@ -2248,6 +2327,13 @@ say "   лог:       $LOG"
 if [ "$CHECK_ONLY" = 0 ] && [ -n "$ADDR" ]; then
 	mkdir -p "$STATE" 2>/dev/null
 	echo "$WAN_IF" >"$STATE/wan-iface" 2>/dev/null
+	if [ "$DO_SYSTEM" = 1 ] && [ "$MODE" = hilink ]; then
+		_sh_snapshot="$WAN_IF $(cat "/sys/class/net/$WAN_IF/ifindex" 2>/dev/null) $ADDR $GW $DNS_AUTO"
+		if [ "$(cat "$STATE/system-uplink" 2>/dev/null)" != "$_sh_snapshot" ]; then
+			echo "$_sh_snapshot" >"$STATE/system-uplink.new.$$" &&
+				mv "$STATE/system-uplink.new.$$" "$STATE/system-uplink"
+		fi
+	fi
 	# Иконка сотовой сети в статус-баре: показать сигнал этого модема вместо крестика.
 	# Отдельный отцепленный процесс, к подъёму модема отношения не имеет — поэтому и
 	# запускается последним, молча и без права уронить результат (см. tbox-icon.sh auto

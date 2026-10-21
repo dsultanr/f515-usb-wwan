@@ -301,6 +301,7 @@ bring_up
 # и ждать этого целую минуту незачем. Скрипт молчит, когда менять нечего, так что
 # в лог попадают только переключения.
 watch_sleep() {
+	WAKE_DETECTED=0
 	_ws_left=$WATCH_INTERVAL
 	while [ "$_ws_left" -gt 0 ]; do
 		_ws_step=$WIFI_INTERVAL
@@ -314,6 +315,7 @@ watch_sleep() {
 		# ждать для этого конца минутной паузы незачем. Выходим сразу, сбрасывая
 		# счётчики ошибок, проверки основного цикла всё увидят и сами.
 		if [ "$_ws_slept" -gt $((_ws_step + WAKE_SLACK)) ]; then
+			WAKE_DETECTED=1
 			log "watchdog: голова просыпалась (пауза $_ws_step с заняла $_ws_slept с) — проверяю связь сразу"
 			soft_fails=0
 			: >"$RESTARTS"
@@ -396,6 +398,28 @@ while :; do
 	fi
 
 	if [ "$HARD" = 0 ]; then
+		# A router modem can keep LTE, USB IP and ping working while Android
+		# loses the app route or DNS NAT. Reapply the normal UI setup on wake
+		# or a failed structural check; do NOT reset the interface/DHCP session.
+		if [ "$IF" != ppp0 ]; then
+			if [ "$WAKE_DETECTED" = 1 ]; then
+				_app_reason="выход из сна"
+				_app_rc=1
+			else
+				_app_reason=$(sh "$UP" --system-health 2>&1)
+				_app_rc=$?
+			fi
+			if [ "$_app_rc" != 0 ]; then
+				log "watchdog: восстанавливаю сеть Android ($_app_reason), без сброса модема"
+				bring_up
+				_app_reason=$(sh "$UP" --system-health 2>&1)
+				if [ $? = 0 ]; then
+					log "watchdog: маршруты и DNS сети Android восстановлены"
+				else
+					log "watchdog: сеть Android ещё не готова ($_app_reason); повторю проверку"
+				fi
+			fi
+		fi
 		# Адрес на месте — ещё не значит, что связь живая. Но и ронять сессию
 		# из-за одного потерянного пинга нельзя: у части операторов ICMP режется,
 		# поэтому реагируем только на три неудачи подряд.
