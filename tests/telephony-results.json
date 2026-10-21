@@ -1,6 +1,7 @@
 {
   "date": "2026-10-21",
   "stage": "bounded-native-prototype",
+  "followUp": "navigator-telephony-results.json records the subsequent real Navigator test",
   "device": "F515 Android 11 arm64, SELinux permissive",
   "modem": "Huawei E3272, firmware 21.491.05.00.00, USB 12d1:1506, LTE",
   "client": "su.dsr.f515.cell_probe (ordinary UID, public Telephony APIs)",

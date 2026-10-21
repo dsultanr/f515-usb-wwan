@@ -23,6 +23,7 @@ public final class CellRuntimeBridge {
     static IBinder originalPhone;
     static CellBinder wrapper;
     static Application app;
+    static int featureQueries;
 
     static void log(String text) { android.util.Log.w("WwanCells", text); }
     static void clearFeatureCache() throws Exception {
@@ -54,12 +55,18 @@ public final class CellRuntimeBridge {
     public static synchronized void start(Application application) throws Exception {
         if (active) { log("already active"); return; }
         app = application;
-        final String pkg = app.getPackageName();
+        // Also support an early worker before Application exists. The external test
+        // still has to prove preparation preceded the real client's feature query.
+        String detected = app != null ? app.getPackageName() : (String)
+                Class.forName("android.app.ActivityThread").getMethod("currentPackageName").invoke(null);
+        if (detected == null) detected = read("/proc/self/cmdline").split("\u0000", 2)[0];
+        final String pkg = detected;
         if (pkg.equals("com.android.phone")) {
             originalPhone = service();
             // Forwarding across another process would change the Binder caller UID: forbid it.
             if (!(originalPhone instanceof Binder) || !DESCRIPTOR.equals(originalPhone.getInterfaceDescriptor()))
                 throw new IllegalStateException("phone binder is not local");
+            if (app == null) throw new IllegalStateException("phone application not ready");
             wrapper = new CellBinder(originalPhone, app);
             active = true;
             try {
@@ -69,33 +76,46 @@ public final class CellRuntimeBridge {
             log("native phone adapter active; normal Binder caller identity preserved");
         } else if (pkg.equals(PROBE) || pkg.equals(NAVI)) {
             // Only this process sees the feature; no global telephony/SIM capability changes.
-            packageManager = app.getPackageManager();
-            pmField = packageManager.getClass().getDeclaredField("mPM");
-            pmField.setAccessible(true);
-            oldPm = pmField.get(packageManager);
-            threadPmField = Class.forName("android.app.ActivityThread").getDeclaredField("sPackageManager");
+            Class<?> threadClass = Class.forName("android.app.ActivityThread");
+            oldThreadPm = threadClass.getMethod("getPackageManager").invoke(null);
+            threadPmField = threadClass.getDeclaredField("sPackageManager");
             threadPmField.setAccessible(true);
-            oldThreadPm = threadPmField.get(null);
+            if (app != null) {
+                packageManager = app.getPackageManager();
+                pmField = packageManager.getClass().getDeclaredField("mPM");
+                pmField.setAccessible(true);
+                oldPm = pmField.get(packageManager);
+            }
             final Class<?> pmInterface = Class.forName("android.content.pm.IPackageManager");
-            final Object delegate = oldPm;
+            final Object delegate = oldThreadPm;
+            featureQueries = 0;
             proxyPm = Proxy.newProxyInstance(pmInterface.getClassLoader(), new Class<?>[]{pmInterface},
                     new InvocationHandler() {
                         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
                             if (active && method.getName().equals("hasSystemFeature") && args != null
                                     && args.length == 2 && "android.hardware.telephony".equals(args[0])
-                                    && ((Integer)args[1]) == 0) return true;
+                                    && ((Integer)args[1]) == 0) {
+                                if (featureQueries++ < 5) {
+                                    StringBuilder trace = new StringBuilder("telephony feature queried");
+                                    for (StackTraceElement frame : Thread.currentThread().getStackTrace())
+                                        if (frame.getClassName().startsWith("com.yandex."))
+                                            trace.append(" <- ").append(frame);
+                                    log(trace.toString());
+                                }
+                                return true;
+                            }
                             try { return method.invoke(delegate, args); }
                             catch (InvocationTargetException e) { throw e.getCause(); }
                         }
                     });
             active = true;
             try {
-                pmField.set(packageManager, proxyPm);
+                if (pmField != null) pmField.set(packageManager, proxyPm);
                 // New ContextImpl instances must use the same local delegate.
                 threadPmField.set(null, proxyPm);
                 clearFeatureCache();
             } catch (Exception e) { stop(); throw e; }
-            log("local feature adapter active for " + pkg);
+            log("local feature adapter active for " + pkg + "; beforeApplication=" + (app == null));
         } else throw new SecurityException("unsupported process " + pkg);
 
         final long token = ++generation;

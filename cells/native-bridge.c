@@ -49,10 +49,19 @@ static int exemptions(JNIEnv *env) {
 
 static int load(JNIEnv *env, jobject app) {
     if (bridge) return 0;
-    jclass appcls = (*env)->GetObjectClass(env, app);
-    jmethodID loader = (*env)->GetMethodID(env, appcls, "getClassLoader", "()Ljava/lang/ClassLoader;");
-    if (!loader) return -1;
-    jobject parent = (*env)->CallObjectMethod(env, app, loader);
+    jobject parent;
+    if (app) {
+        jclass appcls = (*env)->GetObjectClass(env, app);
+        jmethodID loader = (*env)->GetMethodID(env, appcls, "getClassLoader", "()Ljava/lang/ClassLoader;");
+        if (!loader) return -1;
+        parent = (*env)->CallObjectMethod(env, app, loader);
+    } else {
+        jclass loadercls = (*env)->FindClass(env, "java/lang/ClassLoader");
+        if (!loadercls) return -1;
+        jmethodID loader = (*env)->GetStaticMethodID(env, loadercls, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
+        if (!loader) return -1;
+        parent = (*env)->CallStaticObjectMethod(env, loadercls, loader);
+    }
     if (!parent || exception(env, "app loader")) return -1;
     jclass buffercls = (*env)->FindClass(env, "java/nio/ByteBuffer");
     if (!buffercls) return -1;
@@ -108,7 +117,7 @@ static void *worker(void *arg) {
         jmethodID current = (*env)->GetStaticMethodID(env, activity, "currentApplication", "()Landroid/app/Application;");
         if (!current) goto finish;
         jobject app = (*env)->CallStaticObjectMethod(env, activity, current);
-        if (!app || exception(env, "application") || load(env, app)) goto finish;
+        if (exception(env, "application") || load(env, app)) goto finish;
         jmethodID start = (*env)->GetStaticMethodID(env, bridge, "start", "(Landroid/app/Application;)V");
         if (!start) goto finish;
         (*env)->CallStaticVoidMethod(env, bridge, start, app);

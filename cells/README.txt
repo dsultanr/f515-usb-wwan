@@ -9,6 +9,14 @@ getAllCellInfo() and requestCellInfoUpdate(). Effective location AppOps denial
 returns no cells; restoring access restores the result. Samples expire after
 60 seconds of elapsedRealtime (including suspend) and cannot cross a reboot.
 
+Navigator 31.1.3 (739706920) was then tested directly. The local feature adapter
+was ready before Application existed; its feature query stack identifies the
+real com.yandex.runtime.sensors.internal.telephony.TelephonySubscription.
+The phone Binder recorded requests from Navigator's UID with counts 1 -> 0 -> 1:
+fresh cell, expired sample, refreshed cell. Navigator remained in the SAME
+process throughout that sequence. Its queries continued about every 90 seconds.
+This establishes client delivery and recovery, not improved positioning.
+
 This is NOT integrated into the released WWAN APK or boot service. The current
 collector is an explicit single scan while other AT users are quiescent. The
 native adapters revert after five minutes or an explicit stop. Nothing starts
@@ -37,6 +45,12 @@ local feature cache on start/stop. No feature is added in system_server.
 This matters because the tested Navigator skips TelephonySubscription
 entirely when the feature is missing. Installing the adapter after that
 constructor ran does not revive an existing subscription.
+The native loader also supports an early start before Application exists.
+The test used a short-lived PID watcher; it observed preparation 6.8 seconds
+before Navigator's feature query. That observation is not a guaranteed startup
+ordering for a product. Debugger-wait cannot be used to enforce ordering on
+this production firmware: ro.debuggable=0 and its non-debuggable apps cannot
+load the JDWP agent, so waitForDebugger returns without actually waiting.
 
 native-bridge.c: embeds DEX in a .so, attaches a JNI worker, installs/removes
 the Java adapters. No ART method patching and no Frida dependency.
@@ -89,8 +103,9 @@ hashes. Private modem transcripts, app reports and Android sources remain in
 ignored tests/results/lbs-20261021; they are not APK assets or release files.
 
 Still required before any product release:
-* Confirm that Navigator 31.1.3 starts its own Telephony subscription and
-  passes the real cells to MapKit. A probe app result alone does not prove it.
+* The real Navigator subscription and callback delivery are now confirmed.
+  Native MapKit processing follows the inspected callback code; the JNI call
+  and any server-side use were not instrumented directly.
 * Arrange feature readiness before that subscription is constructed. An
   arbitrary delayed injection is a startup race and is not a solution.
 * Collect continuously using one coordinated AT owner/lock shared with icon,
@@ -102,3 +117,11 @@ Still required before any product release:
   Android delivery support for those radio types; the current adapter is LTE.
 * Verify effects on location accuracy/time to fix with repeatable measurements.
   Delivering raw cells is not a promise of a network location fix from Yandex.
+
+The direct Navigator test was followed by explicit adapter stop and a normal
+Navigator launch. system_server and com.android.phone kept their original PIDs;
+PPP was not stopped, the icon poller was restored, and debug-app settings were
+cleared. An external-storage warning appeared exactly 328 times in BOTH the
+instrumented and normal startup, so it is not specific to this adapter. No
+Navigator crash or cell-request exception was found in the captured windows.
+See tests/navigator-telephony-results.json for times, hashes and evidence paths.

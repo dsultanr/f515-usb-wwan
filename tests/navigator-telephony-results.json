@@ -1,0 +1,50 @@
+{
+  "date": "2026-10-21",
+  "timezone": "Europe/Moscow",
+  "stage": "direct-navigator-bounded-native-test",
+  "device": "F515 Android 11 arm64, SELinux permissive",
+  "navigatorVersion": "31.1.3",
+  "navigatorVersionCode": 739706920,
+  "navigatorUid": 10068,
+  "navigatorTestPid": 21305,
+  "acceleratorOnDevice": "3.2.1-dev2 (259)",
+  "modem": "Huawei E3272, LTE",
+  "nativeLibrarySha256": "35c691ea0c577460407a045ff736e1a5e0908eb7529d6ca43f79b5ce795563b0",
+  "collectorUsedSha256": "76e60081340147ff40281f388f47ef33ea8acd2a24bb33fc464664364805e77e",
+  "events": [
+    {"time": "15:01:14.444", "event": "phone adapter installed"},
+    {"time": "15:01:15.169", "event": "Navigator local feature adapter installed before Application"},
+    {"time": "15:01:21.955", "event": "feature query stack identifies TelephonySubscription constructor"},
+    {"time": "15:01:22.636", "event": "requestCellInfoUpdate from Navigator", "cellCount": 1},
+    {"time": "15:02:53.657", "event": "requestCellInfoUpdate from same Navigator process after sample expiry", "cellCount": 0},
+    {"time": "15:04:23.654", "event": "requestCellInfoUpdate from same Navigator process after fresh measurement", "cellCount": 1},
+    {"time": "15:05:15.170", "event": "Navigator adapter explicitly stopped"},
+    {"time": "15:05:15.253", "event": "phone adapter explicitly stopped"}
+  ],
+  "comparison": {
+    "normalNavigatorPid": 2020,
+    "invalidExternalStorageMkdirWarningsWithAdapter": 328,
+    "invalidExternalStorageMkdirWarningsWithoutAdapter": 328,
+    "navigatorFatalExceptionsInCapturedWindows": 0,
+    "cellRequestErrorsInCapturedWindows": 0,
+    "systemServerPidBeforeAndAfter": 904,
+    "phonePidBeforeAndAfter": 4481,
+    "pppStopped": false,
+    "iconPollerRestored": true,
+    "debugAppCleared": true
+  },
+  "interpretation": {
+    "directlyObserved": "Navigator constructs its Telephony subscription and receives current modem cells through Android Telephony; its polling survives an empty result and accepts fresh data without restart.",
+    "inferredFromInspectedCode": "TelephonySubscription.onCellInfo converts the list, invokes postTelephonyNetworkInfo JNI, then schedules the next request.",
+    "notMeasured": "JNI internals, backend use of these observations, location accuracy or time to fix.",
+    "startupLimitation": "A bounded PID watcher won the startup race in this run. Production readiness ordering remains to be implemented; debugger-wait does not work for non-debuggable apps on this firmware."
+  },
+  "privateEvidenceIgnored": [
+    "tests/results/lbs-20261021/navi-native-start.txt",
+    "tests/results/lbs-20261021/navi-next-request.txt",
+    "tests/results/lbs-20261021/navi-refresh-window.txt",
+    "tests/results/lbs-20261021/navi-normal-launch.txt",
+    "tests/results/lbs-20261021/navi-logcat.txt",
+    "tests/results/lbs-20261021/navi-normal-logcat.txt"
+  ]
+}
