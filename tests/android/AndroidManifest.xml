@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="su.dsr.f515.cell_probe" android:versionCode="1" android:versionName="prototype">
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="30"/>
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
+    <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <application android:label="Temporary CellInfo test" android:allowBackup="false">
+        <service android:name=".CellProbeService" android:exported="true"
+            android:foregroundServiceType="location"/>
+    </application>
+</manifest>

@@ -617,6 +617,7 @@ public final class TboxWire {
     }
 
     static volatile Sig cachedSignal = null;
+    static volatile long lastAtSampleMs;
 
     /**
      * Мгновенный доступ к последнему намеренному значению. НИЧЕГО не блокирует.
@@ -708,9 +709,15 @@ public final class TboxWire {
     static Sig pollPpp(String tty, String iface, boolean linked) {
         String stage = linked ? ("линк " + iface) : "линка ещё нет";
         String out = at(tty, "AT+CSQ", "AT+COPS?", "AT+CREG?");
+        if (out != null && out.contains("WWAN_AT_BUSY")) {
+            Sig last = cachedSignal;
+            return last != null && android.os.SystemClock.elapsedRealtime() - lastAtSampleMs < 60000
+                    ? last : new Sig(REG_NONE, -1, "AT-порт занят, сигнал устарел");
+        }
         if (out == null) {
             return new Sig(REG_STATUS_NONE, -1, stage + ", " + tty + " не отвечает");
         }
+        lastAtSampleMs = android.os.SystemClock.elapsedRealtime();
         // +CREG: <n>,<stat>: 1 — зарегистрирован дома, 5 — в роуминге; 2 — ищет сеть,
         // 0/3/4 — не зарегистрирован. Пока ищет — палки рисовать нечестно.
         int creg = -1;
@@ -834,24 +841,14 @@ public final class TboxWire {
     static String at(String tty, String... cmds) {
         java.io.File atSh = new java.io.File(wwanDir, "at.sh");
         if (atSh.isFile()) {
-            String[] argv = new String[cmds.length + 3];
-            argv[0] = "sh"; argv[1] = atSh.getPath(); argv[2] = tty;
-            System.arraycopy(cmds, 0, argv, 3, cmds.length);
+            String[] argv = new String[cmds.length + 5];
+            argv[0] = "env"; argv[1] = "AT_LOCK_WAIT=0";
+            argv[2] = "sh"; argv[3] = atSh.getPath(); argv[4] = tty;
+            System.arraycopy(cmds, 0, argv, 5, cmds.length);
             return sh(argv, 4000 + 2500 * cmds.length);
         }
-        // Тот же обмен, что в at.sh, если файла рядом не оказалось. Подоболочка и
-        // timeout --foreground обязательны: чтение из фоновой группы процессов иначе
-        // встаёт на SIGTTIN навсегда.
-        StringBuilder cmd = new StringBuilder();
-        cmd.append("stty -F ").append(tty).append(" raw -echo -iuclc min 0 time 5 >/dev/null 2>&1; ");
-        cmd.append("( exec 9<>").append(tty).append(" || exit 1; ");
-        cmd.append("  timeout --foreground 1 cat <&9 >/dev/null 2>&1; ");
-        for (String c : cmds) {
-            cmd.append("  printf '").append(c).append("\\r' >&9; ");
-            cmd.append("  timeout --foreground 2 cat <&9 | tr -d '\\r'; ");
-        }
-        cmd.append(")");
-        return sh(new String[] { "sh", "-c", cmd.toString() }, 4000 + 2500 * cmds.length);
+        // Do not bypass the shared lock if the payload is incomplete.
+        return null;
     }
 
     // ------------------------------------------------------------------ hilink: веб-API

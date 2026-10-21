@@ -20,6 +20,7 @@ public class Keeper {
     static final String BOOT = DIR + "/wwan-boot.sh";
     static final String FORMAT = DIR + "/format-sdcard.sh";
     static final String ICON = DIR + "/tbox-icon.sh";
+    static final String CELLS = DIR + "/wwan-cells.sh";
     static final String SMS = DIR + "/sms.sh";
     static final String ADB_HOST = "127.0.0.1";
     static final int ADB_PORT = 5555;
@@ -43,10 +44,15 @@ public class Keeper {
             {"wwan-up.sh", "wwan-up.sh", Boolean.TRUE},
             {"wwan-boot.sh", "wwan-boot.sh", Boolean.TRUE},
             {"dial.sh", "dial.sh", Boolean.TRUE},
+            {"at-lock.sh", "at-lock.sh", Boolean.TRUE},
             {"at.sh", "at.sh", Boolean.TRUE},
             {"format-sdcard.sh", "format-sdcard.sh", Boolean.TRUE},
             {"tbox-icon.sh", "tbox-icon.sh", Boolean.TRUE},
             {"sms.sh", "sms.sh", Boolean.TRUE},
+            {"wwan-cells.sh", "wwan-cells.sh", Boolean.TRUE},
+            {"cell-native-inject", "cell-native-inject", Boolean.TRUE},
+            {"libwwan_cells.so", "libwwan_cells.so", Boolean.FALSE},
+            {"cell-collector.jar", "cell-collector.jar", Boolean.FALSE},
             {"tboxwire.jar", "tboxwire.jar", Boolean.FALSE},
             {"huawei-modeswitch", "huawei-modeswitch", Boolean.TRUE},
             {"usbserialmerged2.ko", "usbserialmerged2.ko", Boolean.FALSE},
@@ -89,6 +95,10 @@ public class Keeper {
     /** sms.sh with the given arguments ("list", "delete <id>", "delete_all"). */
     public static String runSms(Context ctx, String args, Progress progress) {
         return exec(ctx, SMS, args, progress);
+    }
+
+    public static String runCells(Context ctx, String args, Progress progress) {
+        return exec(ctx, CELLS, args, progress);
     }
 
     /**
@@ -249,7 +259,7 @@ public class Keeper {
     }
 
     /**
-     * Pushes only files that are missing or the wrong size (idempotent: pressing any
+     * Pushes only files whose SHA-256 differs (idempotent: pressing any
      * button again after the first run does not re-transfer ~800 KB every time).
      * Uses base64 chunks over the shell channel rather than the sync protocol, since the
      * shell() helper already exists and is proven to work - large payloads are just split
@@ -257,28 +267,45 @@ public class Keeper {
      */
     static void deployMissing(Context ctx, AdbClient adb, Progress progress, StringBuilder sb)
             throws Exception {
-        for (Object[] f : FILES) {
-            String assetName = (String) f[0];
-            String remote = DIR + "/" + f[1];
-            boolean exec = (Boolean) f[2];
-
-            byte[] data = asset(ctx, assetName);
-            String remoteSize = adb.shell("stat -c%s " + remote + " 2>/dev/null || echo 0").trim();
-            if (String.valueOf(data.length).equals(remoteSize)) {
-                line(progress, sb, "  " + assetName + ": уже на месте (" + data.length + " Б)");
-                continue;
+        boolean paused = false, iconChanged = false, complete = false;
+        try {
+            for (Object[] f : FILES) {
+                String assetName = (String) f[0], remote = DIR + "/" + f[1];
+                boolean executable = (Boolean) f[2];
+                byte[] data = asset(ctx, assetName);
+                byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(data);
+                StringBuilder hex = new StringBuilder();
+                for (byte value : digest) hex.append(String.format(java.util.Locale.US, "%02x", value & 255));
+                String expected = hex.toString();
+                String actual = adb.shell("sha256sum " + remote + " 2>/dev/null").trim();
+                if (actual.startsWith(expected + " ")) continue;
+                if (!paused) {
+                    String out = adb.shell("if [ -f " + CELLS + " ]; then sh " + CELLS
+                            + " pause; else true; fi; echo pause_rc=$?");
+                    if (!out.contains("pause_rc=0")) throw new java.io.IOException("Не удалось приостановить данные соты");
+                    paused = true;
+                }
+                line(progress, sb, "  " + assetName + ": обновляю (" + data.length + " Б)...");
+                String stage = remote + ".new";
+                pushFile(adb, data, stage);
+                String mode = assetName.equals("cell-native-inject") ? "700" : executable ? "755" : "644";
+                String done = adb.shell("chmod " + mode + " " + stage + " && sha256sum " + stage).trim();
+                if (!done.startsWith(expected + " ")) throw new java.io.IOException(assetName + ": SHA-256 не совпал");
+                if (!adb.shell("mv " + stage + " " + remote + " && echo installed").contains("installed"))
+                    throw new java.io.IOException(assetName + ": установка не завершена");
+                iconChanged |= assetName.equals("tboxwire.jar");
             }
-
-            line(progress, sb, "  " + assetName + ": заливаю (" + data.length + " Б)...");
-            pushFile(adb, data, remote);
-
-            String newSize = adb.shell("stat -c%s " + remote + " 2>/dev/null || echo -1").trim();
-            if (!String.valueOf(data.length).equals(newSize)) {
-                throw new java.io.IOException(assetName + ": после заливки размер " + newSize
-                        + ", ожидался " + data.length);
+            complete = true;
+        } finally {
+            if (complete) {
+                // A running old Java poller keeps its old bytecode until it is restarted.
+                if (iconChanged) adb.shell("p=$(cat " + DIR + "/state/tbox.pid 2>/dev/null);"
+                        + " case \"$p\" in ''|*[!0-9]*) ;; *)"
+                        + " if [ -r /proc/$p/cmdline ] && [ \"$(tr '\\000' '\\n' </proc/$p/cmdline | head -1)\" = tboxwire ];"
+                        + " then kill \"$p\"; fi ;; esac; sh " + ICON + " auto >/dev/null 2>&1");
+                adb.shell("sh " + CELLS + " resume >/dev/null 2>&1");
             }
-            if (exec) adb.shell("chmod 755 " + remote);
-            line(progress, sb, "  " + assetName + ": ok");
+            // An incomplete update remains paused. Never run mixed native/Java versions.
         }
     }
 

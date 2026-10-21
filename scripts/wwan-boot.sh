@@ -349,6 +349,7 @@ watch_sleep() {
 # pidfile уже занят выше, перед задержкой — здесь заново его писать не нужно.
 log "watchdog: проверка каждые $WATCH_INTERVAL с (не больше $MAX_RESTARTS_PER_HOUR перезапусков в час)"
 
+[ -x "$DIR/wwan-cells.sh" ] && sh "$DIR/wwan-cells.sh" auto >/dev/null 2>&1
 soft_fails=0
 while :; do
 	watch_sleep
@@ -373,6 +374,7 @@ while :; do
 	# Иконка сотовой сети живёт отдельным процессом и к связи отношения не имеет:
 	# проверяем её тут же, но молча и не влияя ни на что (см. docs/status-icon.md).
 	[ -x "$DIR/tbox-icon.sh" ] && sh "$DIR/tbox-icon.sh" auto >/dev/null 2>&1
+	[ -x "$DIR/wwan-cells.sh" ] && sh "$DIR/wwan-cells.sh" auto >/dev/null 2>&1
 
 	log_trim $LOG_FILES
 

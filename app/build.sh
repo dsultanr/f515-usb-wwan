@@ -13,15 +13,20 @@ PLATFORM=${ANDROID_JAR:-$SDK/android-11/android.jar}
 PROJ=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$PROJ/.." && pwd)
 OUT=$PROJ/build
-APK=$PROJ/F515UsbWwanApp.apk
+APK=${APK_OUTPUT:-$PROJ/F515UsbWwanApp.apk}
+
+mkdir -p "$PROJ/assets"
+bash "$ROOT/cells/build-native.sh"
+cp "$ROOT/cells/build/native-inject" "$PROJ/assets/cell-native-inject"
+cp "$ROOT/cells/build/libwwan_cells.so" "$ROOT/cells/build/cell-collector.jar" "$PROJ/assets/"
 
 mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/res-compiled" "$PROJ/assets"
 
 echo "== assets (scripts + modules + tools)"
 for f in "$ROOT"/scripts/wwan-up.sh "$ROOT"/scripts/wwan-boot.sh \
-         "$ROOT"/scripts/dial.sh "$ROOT"/scripts/at.sh "$ROOT"/scripts/format-sdcard.sh \
+         "$ROOT"/scripts/dial.sh "$ROOT"/scripts/at-lock.sh "$ROOT"/scripts/at.sh "$ROOT"/scripts/format-sdcard.sh \
          "$ROOT"/scripts/tbox-icon.sh \
-         "$ROOT"/scripts/sms.sh \
+         "$ROOT"/scripts/sms.sh "$ROOT"/scripts/wwan-cells.sh \
          "$ROOT"/tbox/prebuilt/tboxwire.jar \
          "$ROOT"/tools/huawei-modeswitch \
          "$ROOT"/modules/prebuilt/usbserialmerged2.ko "$ROOT"/modules/prebuilt/ppp_async.ko \
@@ -54,13 +59,14 @@ echo "== aapt2 link (manifest + assets + res)"
 
 echo "== javac"
 find "$PROJ/src" -name '*.java' > "$OUT/sources.txt"
+TASK_CLASSES=$(mktemp -d "$OUT/classes.XXXXXX")
 javac -source 8 -target 8 -nowarn \
     -bootclasspath "$PLATFORM" \
-    -d "$OUT/classes" @"$OUT/sources.txt" 2>&1 | grep -v 'bootstrap class path' || true
+    -d "$TASK_CLASSES" @"$OUT/sources.txt"
 
 echo "== d8"
 "$BT/d8" --min-api 26 --output "$OUT/dex" \
-    $(find "$OUT/classes" -name '*.class')
+    $(find "$TASK_CLASSES" -name '*.class')
 
 echo "== package"
 cp "$OUT/base.apk" "$OUT/unsigned.apk"

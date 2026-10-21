@@ -1,0 +1,36 @@
+{
+  "date": "2026-10-21",
+  "stage": "bounded-native-prototype",
+  "followUp": "navigator-telephony-results.json records the subsequent real Navigator test",
+  "device": "F515 Android 11 arm64, SELinux permissive",
+  "modem": "Huawei E3272, firmware 21.491.05.00.00, USB 12d1:1506, LTE",
+  "client": "su.dsr.f515.cell_probe (ordinary UID, public Telephony APIs)",
+  "nativeLibrarySha256": "4b0de3905971b5ac7153543eb7d746a26999443643e2509274ddda591b8bf308",
+  "injectorSha256": "c07f7c73a0e86a5faa2fbef6e8740e947787a356d7293e422bbc32ad85922083",
+  "collectorUsedSha256": "76e60081340147ff40281f388f47ef33ea8acd2a24bb33fc464664364805e77e",
+  "checks": {
+    "pureJavaParserAndFreshness": "35 passed",
+    "baseline": "get count=0, request callback error=1, telephony feature=false",
+    "nativeFresh": "get count=1, request count=1, telephony feature=true",
+    "effectiveUidLocationAppOpDenied": "get count=0, request count=0",
+    "sameSamplePermissionRestored": "get count=1, request count=1",
+    "sampleOlderThan60Seconds": "get count=0, request count=0",
+    "nativeExplicitStop": "get count=0, request callback error=1, telephony feature=false",
+    "unmodifiedPhoneMethods": "phoneCount=2 and simState=0 before, during and after",
+    "globalTelephonyFeature": "absent throughout",
+    "callerIdentity": "com.android.phone logged the ordinary probe UID 10069",
+    "systemServerAndPhone": "same PIDs throughout, no restart",
+    "fridaInPhoneAfterNativeTest": "no frida-agent mapping",
+    "modemConfiguration": "read-only collection, original COPS/CEREG/CGREG modes restored",
+    "iconAndPpp": "icon restored after each AT scan; PPP process was not stopped"
+  },
+  "notYetVerified": [
+    "Navigator's own subscription and native MapKit ingestion",
+    "continuous shared AT collection",
+    "production startup/sleep/restart lifecycle",
+    "radio types other than LTE and other modems",
+    "actual positioning benefit"
+  ],
+  "evidenceDirectoryIgnored": "tests/results/lbs-20261021",
+  "note": "Contains no live cell identities, coordinates, subscriber IDs or modem serials. Earlier package-level AppOps ignore was ineffective due to the UID override; the reported deny/reallow test used the effective UID mode."
+}
