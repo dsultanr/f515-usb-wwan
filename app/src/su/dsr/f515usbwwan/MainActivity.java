@@ -59,6 +59,7 @@ public class MainActivity extends Activity {
         addAutostartButton();
         addSmsButton();
         addIconButton();
+        addCellsButton();
         addWhitelistButton();
         addDnsButton();
         addVpnButton();
@@ -427,6 +428,52 @@ public class MainActivity extends Activity {
      * состояние, которое живёт само по себе, поэтому сначала спрашиваем голову, что там
      * сейчас, и только потом показываем выбор.
      */
+    private void addCellsButton() {
+        buttonsRow.addView(button("Данные соты", new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (busy) return;
+                setBusy(true);
+                background(new Runnable() {
+                    @Override public void run() {
+                        final String status = Keeper.runCells(MainActivity.this, "status", null);
+                        ui.post(new Runnable() {
+                            @Override public void run() {
+                                setBusy(false);
+                                final boolean enabled = value(status, "enabled").equals("on");
+                                String detail = "";
+                                for (String line : status.split("\n")) if (line.startsWith("{")) {
+                                    try {
+                                        org.json.JSONObject data = new org.json.JSONObject(line);
+                                        String source = data.optString("sourceStatus");
+                                        detail = "\n\n" + (source.equals("ready") ? "Модем отдаёт данные LTE-соты."
+                                                : source.equals("http-cell-unsupported") ? "HTTP API модема не отдаёт данные соты."
+                                                : source.equals("http-auth-required") ? "HTTP API модема требует авторизации."
+                                                : source.equals("radio-unsupported") ? "Доступна сеть другого типа; поддерживается LTE."
+                                                : "Ожидание данных модема.");
+                                        if (data.optString("phase").equals("subscribed"))
+                                            detail += "\nНавигатор запрашивает данные соты.";
+                                    } catch (Exception ignored) { }
+                                }
+                                new AlertDialog.Builder(MainActivity.this).setTitle("Данные соты: " + (enabled ? "включено" : "выключено"))
+                                        .setMessage("Передача данных LTE-соты USB-модема в Яндекс Навигатор как дополнительного источника геолокации. "
+                                                + "После перезагрузки запускается вместе с автозапуском модема." + (enabled ? detail : ""))
+                                        .setPositiveButton(enabled ? "Выключить" : "Включить", new DialogInterface.OnClickListener() {
+                                            @Override public void onClick(DialogInterface d, int which) {
+                                                runInBackground("> Данные соты...", new Job() {
+                                                    @Override public void run(Keeper.Progress p) {
+                                                        Keeper.runCells(MainActivity.this, enabled ? "disable" : "enable", p);
+                                                    }
+                                                });
+                                            }
+                                        }).setNegativeButton("Закрыть", null).show();
+                            }
+                        });
+                    }
+                });
+            }
+        }));
+    }
+
     private void addIconButton() {
         buttonsRow.addView(button("Иконка сети", new View.OnClickListener() {
             @Override

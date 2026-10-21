@@ -1,4 +1,4 @@
-/* Bounded Android 11/arm64 experiment. Loads a Java Binder wrapper, no ART patches.
+/* Lease-controlled Android 11/arm64 integration. Loads a Java Binder wrapper, no ART patches.
  * Entry points return quickly; JNI work runs on a separate attached thread. */
 #define _GNU_SOURCE
 #include <jni.h>
@@ -104,7 +104,7 @@ static void *worker(void *arg) {
     }
     if ((*env)->PushLocalFrame(env, 64) != JNI_OK) goto detach;
     int rc = -1;
-    if (arg) {
+    if (arg == (void *)1) {
         if (!bridge) { rc = 0; goto finish; }
         jmethodID stop = (*env)->GetStaticMethodID(env, bridge, "stop", "()V");
         if (!stop) goto finish;
@@ -118,7 +118,8 @@ static void *worker(void *arg) {
         if (!current) goto finish;
         jobject app = (*env)->CallStaticObjectMethod(env, activity, current);
         if (exception(env, "application") || load(env, app)) goto finish;
-        jmethodID start = (*env)->GetStaticMethodID(env, bridge, "start", "(Landroid/app/Application;)V");
+        jmethodID start = (*env)->GetStaticMethodID(env, bridge,
+                "start", "(Landroid/app/Application;)V");
         if (!start) goto finish;
         (*env)->CallStaticVoidMethod(env, bridge, start, app);
         rc = exception(env, "start");

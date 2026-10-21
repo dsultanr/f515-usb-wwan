@@ -8,6 +8,7 @@ app/assets/wwan-up.sh
 app/assets/wwan-boot.sh
 app/assets/dial.sh
 app/assets/at.sh
+app/assets/at-lock.sh
 app/assets/format-sdcard.sh
 app/assets/tbox-icon.sh
 app/assets/tboxwire.jar
@@ -25,3 +26,8 @@ modules/**/modules.order
 cells/build/
 tests/results/
 tests/android/build/
+
+app/assets/wwan-cells.sh
+app/assets/cell-native-inject
+app/assets/libwwan_cells.so
+app/assets/cell-collector.jar

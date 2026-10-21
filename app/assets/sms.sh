@@ -2,49 +2,52 @@
 # scripts/sms.sh — чтение и управление SMS через AT-порт USB-модема (PPP / AT-режим).
 set -e
 
+DIR=$(cd "$(dirname "$0")" && pwd)
 ACTION="${1:-list}"
-TARGET_ID="$2"
+TARGET_ID="${2:-}"
+LOCKED=0
+if [ "$ACTION" = --locked ]; then
+	PORT=$2; ACTION=$3; TARGET_ID=${4:-}; LOCKED=1
+fi
+case "$ACTION" in list|delete|delete_all) ;; *) echo 'Unknown SMS action'; exit 2 ;; esac
+if [ "$ACTION" = delete ]; then
+	case "$TARGET_ID" in ''|*[!0-9]*) echo 'Invalid SMS index'; exit 2 ;; esac
+fi
 
 # 1. Поиск свободного AT-порта
 find_at_port() {
-	if [ -n "$WWAN_CTRL_TTY" ] && [ -c "$WWAN_CTRL_TTY" ]; then
-		echo "$WWAN_CTRL_TTY"
-		return 0
-	fi
-
 	PPP_TTY=""
 	if pgrep pppd >/dev/null 2>&1; then
 		PPP_TTY=$(ps -ef 2>/dev/null | grep pppd | grep -o 'ttyUSB[0-9]*' | head -1)
 		[ -n "$PPP_TTY" ] && PPP_TTY="/dev/$PPP_TTY"
+	fi
+	selected=${WWAN_CTRL_TTY:-$(cat "$DIR/state/at-tty" 2>/dev/null || true)}
+	if [ -n "$selected" ] && [ -c "$selected" ] && [ "$selected" != "$PPP_TTY" ]; then
+		echo "$selected"; return 0
 	fi
 
 	for t in /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3 /dev/ttyUSB0; do
 		[ -c "$t" ] || continue
 		[ "$t" = "$PPP_TTY" ] && continue
 		# Быстрый опрос AT
-		stty -F "$t" raw -echo -iuclc min 0 time 5 >/dev/null 2>&1 || true
-		RESP=$(timeout --foreground 2 sh -c '
-			exec 3<>"$1" || exit 1
-			printf "AT\r" >&3
-			cat <&3 | tr -d "\r"
-		' sh "$t" 2>/dev/null || true)
+		RESP=$(AT_LOCK_WAIT=2 sh "$DIR/at.sh" "$t" AT 2>/dev/null || true)
 		if echo "$RESP" | grep -q "OK"; then
 			echo "$t"
 			return 0
 		fi
 	done
 
-	for t in /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3; do
-		[ -c "$t" ] && [ "$t" != "$PPP_TTY" ] && echo "$t" && return 0
-	done
-
 	return 1
 }
 
-PORT=$(find_at_port)
+[ "$LOCKED" = 1 ] || PORT=$(find_at_port) || PORT=
 if [ -z "$PORT" ] || [ ! -c "$PORT" ]; then
 	echo "ERROR: Не найден свободный AT-порт модема (ttyUSB)"
 	exit 1
+fi
+
+if [ "$LOCKED" = 0 ]; then
+	exec sh "$DIR/at-lock.sh" "$PORT" 15 sh "$0" --locked "$PORT" "$ACTION" "$TARGET_ID"
 fi
 
 stty -F "$PORT" raw -echo -iuclc min 0 time 5 >/dev/null 2>&1 || true
@@ -73,7 +76,7 @@ list)
 		run_cmd "AT+CPMS=\"ME\",\"ME\",\"ME\""
 		run_cmd "AT+CMGF=0"
 		run_cmd "AT+CMGL=4"
-	' sh "$PORT"
+	' sh "$PORT" 8>&8
 	;;
 
 delete)
@@ -92,7 +95,7 @@ delete)
 				*OK*|*ERROR*|*+CMS\ ERROR*) break ;;
 			esac
 		done
-	' sh "$PORT" "$TARGET_ID"
+	' sh "$PORT" "$TARGET_ID" 8>&8
 	;;
 
 delete_all)
@@ -119,7 +122,7 @@ delete_all)
 			run_cmd "AT+CMGD=$i"
 		done
 		echo "OK"
-	' sh "$PORT"
+	' sh "$PORT" 8>&8
 	;;
 
 *)

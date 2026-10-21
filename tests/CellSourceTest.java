@@ -23,6 +23,7 @@ public final class CellSourceTest {
         check(c.mcc.equals("250") && c.mnc.equals("02"), "PLMN leading zero preserved");
         check(c.dbm == -104 && c.pci == 123, "RSRP and PCI");
         check(c.json().contains("\"mnc\":\"02\""), "JSON MNC");
+        check(HuaweiCellParser.parse(lte.replace("^SYSINFOEX:", "^sysinfoex:").replace("OK", "ok")).sameCell(c), "lowercase modem reply");
         check(HuaweiCellParser.parse(lte.replace("\n", "\r\n")).sameCell(c), "CRLF");
         check(HuaweiCellParser.parse(lte.replace(ce, "COMMAND NOT SUPPORT")).sameCell(c), "LOCINFO fallback");
         check(HuaweiCellParser.parse(lte.replace(loc, "ERROR")).sameCell(c), "CE only");

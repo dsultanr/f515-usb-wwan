@@ -1,0 +1,50 @@
+{
+  "date": "2026-10-21",
+  "stage": "coordinated-cell-source-candidate",
+  "project": "f515-usb-wwan",
+  "branch": "feat/lbs-cell-source",
+  "candidate": {
+    "version": "4.16-dev1",
+    "versionCode": 48,
+    "apkSha256": "d07fef5cb03c691557d894eb48b5f5f5541f64f4cefc148cf0a3be09d1222f4b",
+    "nativeSha256": "32718fefc2d1916e1c3cd145c838d866155e0eb0030cfe7e3b0d714cd09edfb9",
+    "collectorSha256": "fc041469bd2abf666fbe073ad69423226d050e9d0ce2ca834335e0acb5e41878",
+    "buildId": "102022caa69066302c77909699519a3c",
+    "published": false
+  },
+  "device": "F515 Android 11 arm64, SELinux permissive",
+  "navigator": "31.1.3 (739706920)",
+  "modem": "Huawei E3272, 21.491.05.00.00, LTE",
+  "checks": {
+    "java": {
+      "AT_and_freshness": 36,
+      "HTTP": 42,
+      "Toolbox_startup": 10
+    },
+    "hostAT": "Grouped exchanges, no stolen replies, device aliases, busy result, death/release, separate devices, full synthetic SMS transaction and unmarked bring-up output passed.",
+    "androidAT": "Direct exec, nested shell, busy result, wrapper death and release passed using /dev/null. Explicit fd 8 inheritance is necessary on mksh.",
+    "apk": "Signature verified; nine payload assets match canonical source/build bytes; no Frida/JS assets.",
+    "appDeployment": "Candidate installed, Data cell control opened, SHA-256 checked atomic deployment paused and resumed coordinator successfully.",
+    "startup": "Phone native adapter ACK preceded client preparation. Real Navigator feature query and cell requests observed; process-local feature only.",
+    "ordinaryAppPermissions": "UID 10069: getAllCellInfo and requestCellInfoUpdate both 1 with access, both 0 with effective FINE_LOCATION AppOp denied; allow restored.",
+    "busyAndExpiry": "Held selected control-port lock for 75 seconds. Probe 1 -> 0 after sample expiry -> 1 after release. Busy did not refresh the old sample timestamp.",
+    "realNavigator": "UID 10068, PID 24651: same-process requests 1 -> 0 -> 1 across stale source and recovery, and across lease gap. No callback-error-induced process restart.",
+    "leaseGap": "Coordinator PID 18443 SIGSTOP for 17 seconds; during expired lease, ordinary probe got empty successful callbacks. SIGCONT restored 1 within grace, same phone epoch and Navigator PID.",
+    "processes": "system_server=904, com.android.phone=4481, pppd=13085, tboxwire=29084 unchanged during validation. Boot ID unchanged throughout task.",
+    "finalState": "Coordinator enabled, source ready, Navigator subscribed; signal bridge restored to LTE; temporary probe stopped, FINE_LOCATION allow restored, no maintenance/disable marker, WWAN busy=0 -.",
+    "crashBuffer": "No crash-buffer records after 15:20 in the final capture.",
+    "privacy": "Raw serving-cell snapshot stays on tmpfs root:radio 0640 under 0750 directory; tracked reports contain no cell identity."
+  },
+  "unverified": [
+    "Physical Huawei HiLink / ZTE HTTP modem end-to-end operation",
+    "Full physical ignition sleep and cold-boot cycle with this candidate",
+    "Additional Android builds, Navigator versions, modems and non-LTE delivery",
+    "Actual impact on positioning accuracy / time to first fix"
+  ],
+  "intentionalLimits": [
+    "Asynchronous attachment may miss a Navigator subscription already constructed; no MapKit lifecycle manipulation, automatic app restart or extra warning. User performs ordinary restart.",
+    "Shared AT lock coordinates this project only, not unmodified external AT readers.",
+    "A modem returning only operator/signal cannot supply a cell identity; HTTP authentication is not bypassed."
+  ],
+  "privateEvidence": "tests/results/lbs-20261021/coordinator-live.json (ignored, local)"
+}

@@ -780,13 +780,8 @@ at() {
 	_cmd=$2
 	_wait=${3:-2}
 	[ -c "$_tty" ] || return 1
-	stty -F "$_tty" raw -echo -iuclc min 0 time 5 >/dev/null 2>&1
-	(
-		exec 9<>"$_tty" || exit 1
-		timeout --foreground 1 cat <&9 >/dev/null 2>&1
-		printf '%s\r' "$_cmd" >&9
-		timeout --foreground "$_wait" cat <&9 | tr -d '\r'
-	)
+	AT_LOCK_WAIT=15 AT_READ_SECONDS="$_wait" AT_COMMAND_MARKERS=0 \
+		sh "$DIR/at.sh" "$_tty" "$_cmd"
 }
 
 # head -1 обязателен: `ip addr replace` не снимает адреса чужих подсетей, поэтому

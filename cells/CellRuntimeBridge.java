@@ -8,13 +8,12 @@ import java.io.*;
 import java.lang.reflect.*;
 import java.util.*;
 
-/** Temporary, reversible native-loaded integration. No ART method hooks or system_server edits. */
+/** Lease-controlled native integration. No ART method hooks or system_server edits. */
 public final class CellRuntimeBridge {
     static final String DESCRIPTOR = "com.android.internal.telephony.ITelephony";
-    static final String DIR = "/dev/wwan-cell-probe/";
+    static final String DIR = CellFiles.ROOT + "private/";
     static final String PROBE = "su.dsr.f515.cell_probe";
     static final String NAVI = "ru.yandex.yandexnavi";
-    static final long LIFETIME = 300000;
     static volatile boolean active;
     static volatile long generation;
     static Object packageManager, oldPm, proxyPm;
@@ -23,7 +22,8 @@ public final class CellRuntimeBridge {
     static IBinder originalPhone;
     static CellBinder wrapper;
     static Application app;
-    static int featureQueries;
+    static volatile int featureQueries;
+    static volatile String clientPhase = "feature-ready";
 
     static void log(String text) { android.util.Log.w("WwanCells", text); }
     static void clearFeatureCache() throws Exception {
@@ -54,6 +54,7 @@ public final class CellRuntimeBridge {
 
     public static synchronized void start(Application application) throws Exception {
         if (active) { log("already active"); return; }
+        if (!CellFiles.leased()) throw new IllegalStateException("daemon-lease-missing");
         app = application;
         // Also support an early worker before Application exists. The external test
         // still has to prove preparation preceded the real client's feature query.
@@ -64,10 +65,15 @@ public final class CellRuntimeBridge {
         if (pkg.equals("com.android.phone")) {
             originalPhone = service();
             // Forwarding across another process would change the Binder caller UID: forbid it.
+            if (originalPhone != null && originalPhone != wrapper
+                    && originalPhone.getClass().getName().equals(CellBinder.class.getName()))
+                throw new IllegalStateException("previous-adapter-still-stopping");
             if (!(originalPhone instanceof Binder) || !DESCRIPTOR.equals(originalPhone.getInterfaceDescriptor()))
                 throw new IllegalStateException("phone binder is not local");
             if (app == null) throw new IllegalStateException("phone application not ready");
-            wrapper = new CellBinder(originalPhone, app);
+            if (wrapper == null || wrapper.original != originalPhone) wrapper = new CellBinder(originalPhone, app);
+            wrapper.epoch = SystemClock.elapsedRealtimeNanos();
+            synchronized (wrapper.clients) { wrapper.clients.clear(); wrapper.requests.clear(); }
             active = true;
             try {
                 publish(wrapper);
@@ -75,6 +81,7 @@ public final class CellRuntimeBridge {
             } catch (Exception e) { active = false; publish(originalPhone); throw e; }
             log("native phone adapter active; normal Binder caller identity preserved");
         } else if (pkg.equals(PROBE) || pkg.equals(NAVI)) {
+            CellProtocol.call(1, pkg, "preparing", 0); // synchronous phone readiness before feature
             // Only this process sees the feature; no global telephony/SIM capability changes.
             Class<?> threadClass = Class.forName("android.app.ActivityThread");
             oldThreadPm = threadClass.getMethod("getPackageManager").invoke(null);
@@ -95,7 +102,7 @@ public final class CellRuntimeBridge {
                             if (active && method.getName().equals("hasSystemFeature") && args != null
                                     && args.length == 2 && "android.hardware.telephony".equals(args[0])
                                     && ((Integer)args[1]) == 0) {
-                                if (featureQueries++ < 5) {
+                                if (featureQueries++ == 0) {
                                     StringBuilder trace = new StringBuilder("telephony feature queried");
                                     for (StackTraceElement frame : Thread.currentThread().getStackTrace())
                                         if (frame.getClassName().startsWith("com.yandex."))
@@ -116,20 +123,33 @@ public final class CellRuntimeBridge {
                 clearFeatureCache();
             } catch (Exception e) { stop(); throw e; }
             log("local feature adapter active for " + pkg + "; beforeApplication=" + (app == null));
+            clientPhase = "feature-ready";
+            try {
+                CellProtocol.call(1, pkg, clientPhase, featureQueries);
+            } catch (Exception e) { stop(); throw e; }
         } else throw new SecurityException("unsupported process " + pkg);
 
         final long token = ++generation;
-        final long deadline = SystemClock.elapsedRealtime() + LIFETIME;
-        new Thread(new Runnable() {
-            public void run() {
-                while (active && generation == token && SystemClock.elapsedRealtime() < deadline) {
-                    try { Thread.sleep(500); } catch (InterruptedException ignored) { break; }
-                }
-                synchronized (CellRuntimeBridge.class) {
-                    if (generation == token) stop();
-                }
+        new Thread(() -> {
+            long missedSince = 0;
+            while (active && generation == token) {
+                try {
+                    if (CellFiles.revoked()) break;
+                    if (!CellFiles.leased()) {
+                        // On real suspend all threads stop. Give the coordinator a small awake-time
+                        // recovery window; public requests already return EMPTY during this window.
+                        long now = SystemClock.uptimeMillis();
+                        if (missedSince == 0) missedSince = now;
+                        if (now - missedSince >= 5000) break;
+                    } else {
+                        missedSince = 0;
+                        if (!pkg.equals("com.android.phone")) CellProtocol.call(1, pkg, clientPhase, featureQueries);
+                    }
+                    Thread.sleep(1000);
+                } catch (Exception e) { break; }
             }
-        }, "wwan-cell-expiry").start();
+            synchronized (CellRuntimeBridge.class) { if (generation == token) stop(); }
+        }, "wwan-cell-lease").start();
     }
 
     public static synchronized void stop() {
@@ -151,6 +171,9 @@ public final class CellRuntimeBridge {
         final Context context;
         final int getCode, requestCode;
         final String boot;
+        volatile long epoch = SystemClock.elapsedRealtimeNanos();
+        final Map<Integer,JSONObject> clients = new HashMap<>();
+        final Map<Integer,JSONObject> requests = new HashMap<>();
         CellBinder(IBinder original, Context context) throws Exception {
             this.original = original; this.context = context;
             Class<?> stub = Class.forName(DESCRIPTOR + "$Stub");
@@ -183,6 +206,35 @@ public final class CellRuntimeBridge {
         }
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
+            if (code == CellProtocol.CONTROL) {
+                data.enforceInterface(CellProtocol.TOKEN);
+                int operation = data.readInt(); String pkg = data.readString(), phase = data.readString();
+                int queries = data.readInt(), uid = Binder.getCallingUid(), pid = Binder.getCallingPid();
+                try {
+                    JSONObject state = new JSONObject().put("protocol", 2).put("active", active && CellFiles.leased())
+                            .put("phonePid", android.os.Process.myPid()).put("epoch", epoch).put("build", CellBuild.ID);
+                    synchronized (clients) {
+                        if (operation == 1 && (NAVI.equals(pkg) || PROBE.equals(pkg))) {
+                            context.getSystemService(AppOpsManager.class).checkPackage(uid, pkg);
+                            if (phase == null || !phase.matches("[a-z-]{1,40}") || queries < 0)
+                                throw new SecurityException("invalid client status");
+                            if (phase.equals("preparing")) requests.remove(pid);
+                            if (clients.size() > 16) clients.clear();
+                            clients.put(pid, new JSONObject().put("pid", pid).put("uid", uid).put("phase", phase)
+                                    .put("queries", queries).put("at", SystemClock.elapsedRealtime()));
+                        } else if (operation != 0 || uid != 0) throw new SecurityException("root status only");
+                        if (uid == 0) {
+                            JSONArray list = new JSONArray();
+                            for (JSONObject client : clients.values()) list.put(client);
+                            JSONArray req = new JSONArray();
+                            for (JSONObject request : requests.values()) req.put(request);
+                            state.put("clients", list).put("requests", req);
+                        }
+                    }
+                    reply.writeNoException(); reply.writeString(state.toString()); return true;
+                } catch (SecurityException e) { throw e; }
+                catch (Exception e) { throw new IllegalStateException("control", e); }
+            }
             int position = data.dataPosition();
             if (active && (code == getCode || code == requestCode)) {
                 data.enforceInterface(DESCRIPTOR);
@@ -194,7 +246,7 @@ public final class CellRuntimeBridge {
                     try {
                         List<CellInfo> list = allowed(pkg, feature,
                                 code == getCode ? "getAllCellInfo" : "requestCellInfoUpdate")
-                                ? cells(boot) : new ArrayList<CellInfo>();
+                                && CellFiles.leased() ? cells(boot) : new ArrayList<CellInfo>();
                         if (code == getCode) {
                             reply.writeNoException(); reply.writeTypedList(list);
                         } else {
@@ -204,6 +256,11 @@ public final class CellRuntimeBridge {
                             Class.forName("android.telephony.ICellInfoCallback")
                                     .getMethod("onCellInfo", List.class).invoke(target, list);
                             if (reply != null) reply.writeNoException();
+                        }
+                        synchronized (clients) {
+                            if (requests.size() > 16) requests.clear();
+                            requests.put(Binder.getCallingPid(), new JSONObject().put("pid", Binder.getCallingPid())
+                                    .put("uid", Binder.getCallingUid()).put("at", SystemClock.elapsedRealtime()).put("cells", list.size()));
                         }
                         log((code == getCode ? "get" : "request") + " uid=" + Binder.getCallingUid()
                                 + " cells=" + list.size());

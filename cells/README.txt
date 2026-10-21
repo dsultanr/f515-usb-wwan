@@ -1,127 +1,116 @@
-USB modem cells -> Android Telephony: bounded research prototype
-================================================================
+USB modem cells -> Android Telephony (development branch)
+========================================================
 
-Status (2026-10-21)
--------------------
-Native Binder integration works on the F515 Android 11/arm64 head unit.
-An ordinary app receives a real Huawei E3272 LTE CellInfoLte through both
-getAllCellInfo() and requestCellInfoUpdate(). Effective location AppOps denial
-returns no cells; restoring access restores the result. Samples expire after
-60 seconds of elapsedRealtime (including suspend) and cannot cross a reboot.
+Implemented in feat/lbs-cell-source, candidate WWAN 4.16-dev1. Not a public release.
+Tested target: F515, Android 11 arm64; Navigator 31.1.3 (739706920), Huawei E3272 LTE.
+This passes real serving-cell information to Navigator. It does not calculate or
+inject coordinates and does not establish improved accuracy or faster first fix.
 
-Navigator 31.1.3 (739706920) was then tested directly. The local feature adapter
-was ready before Application existed; its feature query stack identifies the
-real com.yandex.runtime.sensors.internal.telephony.TelephonySubscription.
-The phone Binder recorded requests from Navigator's UID with counts 1 -> 0 -> 1:
-fresh cell, expired sample, refreshed cell. Navigator remained in the SAME
-process throughout that sequence. Its queries continued about every 90 seconds.
-This establishes client delivery and recovery, not improved positioning.
+Opt-in and startup
+-----------------
+The WWAN app has a "Данные соты" control; default is OFF. The persistent preference
+is state/cells. When enabled, wwan-cells.sh starts one root app_process coordinator.
+The existing WWAN boot watchdog starts/checks it as part of modem autostart.
+No foreground Navigator launch, force-stop, MapKit reset or private Yandex method
+hook is part of the payload. An already running Navigator which skipped telephony
+may need its next ordinary process start; the user handles that. No extra prompt.
+The earlier public MapKit onStop/onStart experiment was not reliable on repeated
+late attachment and was removed, as requested.
 
-This is NOT integrated into the released WWAN APK or boot service. The current
-collector is an explicit single scan while other AT users are quiescent. The
-native adapters revert after five minutes or an explicit stop. Nothing starts
-automatically. No GPS coordinates are calculated or injected.
+Order: verify Toolbox system guard/app-scale markers against the CURRENT
+system_server PID and enabled settings -> install phone Binder adapter -> verify
+its private handshake -> install the process-local Navigator feature adapter ->
+observe a real Navigator request. Successful dlopen is never treated as ready.
+The coordinator reports waiting states separately from "subscribed". A source may
+still be absent: empty successful cell callbacks keep Navigator's retry loop alive.
+PID observation is asynchronous; if Navigator constructs its subscription first,
+we do not pretend it is subscribed or restart it automatically.
 
-Files
------
-CellObservation/HuaweiCellParser/CellSnapshot: pure Java input validation and
-snapshot model. No CEREG-only identity: some Huawei firmware truncates it.
-CellCollector: root-only, read-only AT scan through the selected control port.
-It refuses a live icon poller or WWAN bring-up, never guesses the PPP port,
-and writes atomically as root:radio 0640. Its output directory must be created
-as root:radio 0750. Raw cell identities must not be copied to normal logs.
+The phone and client adapters require a fresh tmpfs lease (15 seconds, measured
+with elapsedRealtime) with the same boot and build ID. Missing/expired/mismatched
+lease stops delivery immediately. A five-second awake-time grace lets the coordinator
+recover after suspend, returning empty cells meanwhile, then restores the original
+delegates. Explicit disable/update skips that grace. The source has its own 60-second TTL,
+including suspend, and cannot cross a reboot. Process death is detected and the
+new phone must acknowledge readiness before clients are prepared again. A client
+whose own retry loop has already stopped may need its next ordinary start.
 
-CellRuntimeBridge: loaded in com.android.phone and, separately, the client.
-The phone adapter replaces the registered phone Binder inside its ORIGINAL
-process. Unmodified calls delegate to the original LOCAL Binder on the same
-thread; the calling UID is preserved. It never forwards through a root proxy.
-Only the probe and Navigator packages are allowed to request the extra cells.
-checkPackage and Android LocationAccessPolicy enforce caller identity,
-location permission, AppOps, location setting and Android user checks.
+Only one coordinator holds daemon.lock. Native libraries are copied under their
+SHA-256 names and never overwritten in place while mapped. APK payload deployment
+uses SHA-256 verification and atomic replacement, pauses the coordinator during
+changes and restarts the icon poller when its bytecode changes. An incomplete
+update remains paused. Build IDs prevent mixed native/Java adapters from working
+together. Tests have not yet included a physical ignition sleep/cold boot cycle.
 
-The client adapter changes IPackageManager only in that client's process,
-for hasSystemFeature("android.hardware.telephony", 0). It also clears the
-local feature cache on start/stop. No feature is added in system_server.
-This matters because the tested Navigator skips TelephonySubscription
-entirely when the feature is missing. Installing the adapter after that
-constructor ran does not revive an existing subscription.
-The native loader also supports an early start before Application exists.
-The test used a short-lived PID watcher; it observed preparation 6.8 seconds
-before Navigator's feature query. That observation is not a guaranteed startup
-ordering for a product. Debugger-wait cannot be used to enforce ordering on
-this production firmware: ro.debuggable=0 and its non-debuggable apps cannot
-load the JDWP agent, so waitForDebugger returns without actually waiting.
-
-native-bridge.c: embeds DEX in a .so, attaches a JNI worker, installs/removes
-the Java adapters. No ART method patching and no Frida dependency.
-injector.c and art-symbol.h: adapted from the existing F515 Maps native loader
-(repo-f515-maps-speedup-native-clean/native/{injector.c,probe.c}). The loader
-is Android arm64 specific; private Android 11 APIs are capability-checked.
-
-telephony-probe.src.js/build-probe-agent.sh: the earlier, bounded Frida
-experiment for the probe app only. This is research history, not a dependency
-of build-native.sh and not a released app asset. It was detached before the
-native test; no Frida agent remained in com.android.phone afterwards.
-
-Build/check locally
--------------------
-  bash tests/test-cells.sh
-  bash cells/build-native.sh
-  bash tests/android/build.sh
-
-Requires JDK 11, Android 11 android.jar, d8 and NDK r27d. Environment overrides
-are listed in the build scripts. Artifacts stay under ignored build folders.
-
-Explicit on-device use (only in a controlled test)
-------------------------------------------------
-The collector does NOT stop another AT user for you. Obtain exclusive access
-first and restore the user's icon state even if collection fails. Do not kill
-PPP, send configuration-changing AT commands or access its data port.
-
-  CLASSPATH=/path/cell-collector.jar app_process /system/bin CellCollector \
-      /data/local/tmp/wwan /dev/ttyUSB1 /dev/wwan-cell-probe/cell.json
-
-The selected control port must match state/at-tty; ttyUSB1 is the tested unit,
-not a portable default. Verify the current PID/package before every injection.
-Keep the injector root-only. The target must be able to traverse the library
-directory and read the .so; snapshots must remain inaccessible to normal apps.
-
-  native-inject PHONE_PID /absolute/libwwan_cells.so wwan_cells_start 0
-  native-inject CLIENT_PID /absolute/libwwan_cells.so wwan_cells_start 0
-  native-inject CLIENT_PID /absolute/libwwan_cells.so wwan_cells_stop 0
-  native-inject PHONE_PID /absolute/libwwan_cells.so wwan_cells_stop 0
-
-Entry return 0 means worker started, not installation succeeded: verify
-WwanCells logs and real client results. Do not overwrite a .so that is mapped
-in a running process; use a distinct filename for a new test build. A stopped
-library remains mapped but its adapters are inactive. A reboot is not needed.
-
-Evidence and remaining work
+Sources and AT coordination
 ---------------------------
-tests/telephony-results.json records sanitized outcomes and tested artifact
-hashes. Private modem transcripts, app reports and Android sources remain in
-ignored tests/results/lbs-20261021; they are not APK assets or release files.
+AT uses ONLY the selected state/at-tty, never a guessed PPP data port. Huawei
+SYSINFOEX, CECELLID, LOCINFO and HCSQ are read-only, bracketed to reject handovers or
+inconsistent/truncated identities. No registration-mode commands are sent.
+Cell scans normally start about every 30 seconds; a busy port retries after 3 s.
+A busy scan does not refresh the age of the preceding sample.
 
-Still required before any product release:
-* The real Navigator subscription and callback delivery are now confirmed.
-  Native MapKit processing follows the inspected callback code; the JNI call
-  and any server-side use were not instrumented directly.
-* Arrange feature readiness before that subscription is constructed. An
-  arbitrary delayed injection is a startup race and is not a solution.
-* Collect continuously using one coordinated AT owner/lock shared with icon,
-  modem bring-up and SMS. Do not repeatedly stop the icon as production logic.
-* Implement opt-in lifecycle, source loss/disable, sleep and process restart
-  handling; replace the experimental five-minute adapter only after testing.
-* Validate additional modems/RATs and firmware capabilities. Live results here
-  cover Huawei E3272 LTE only. The parser's GSM/WCDMA fixtures do not establish
-  Android delivery support for those radio types; the current adapter is LTE.
-* Verify effects on location accuracy/time to fix with repeatable measurements.
-  Delivering raw cells is not a promise of a network location fix from Yandex.
+at-lock.sh locks by character-device major/minor (aliases share one lock). at.sh,
+WWAN bring-up, icon polling and complete SMS transactions all participate. PPP's
+data port is separate and the active PPP session is not restarted for cell scans.
+The icon can keep its last signal for at most 60 seconds while another reader owns
+the port. Android mksh CLOSES fd 8 on exec unless 8>&8 is explicitly inherited;
+this was caught on-device and has a dedicated regression test. A surviving bounded
+transaction retains the lock even when its wrapper dies. This lock coordinates
+our readers; unmodified external AT tools do not automatically participate.
 
-The direct Navigator test was followed by explicit adapter stop and a normal
-Navigator launch. system_server and com.android.phone kept their original PIDs;
-PPP was not stopped, the icon poller was restored, and debug-app settings were
-cleared. An external-storage warning appeared exactly 328 times in BOTH the
-instrumented and normal startup, so it is not specific to this adapter. No
-Navigator crash or cell-request exception was found in the captured windows.
-See tests/navigator-telephony-results.json for times, hashes and evidence paths.
+HTTP-only Huawei HiLink and ZTE use their read-only APIs. Requests bind to the
+validated USB modem interface and its directly attached private IPv4 gateway,
+ignore proxy environment settings, do not follow redirects and have size/time
+limits. Huawei session/token support uses SesTokInfo without password guessing.
+Unsupported signal endpoints fall back to the other supported endpoints. Missing
+full cell identity is "http-cell-unsupported", not a fabricated cell from bars or
+operator names. Authentication errors are distinct. ZTE cell_id AND lac_code are
+hex even when digit-only; MNC leading zeros/length are preserved. Two consistent
+identity readings are required. Unknown radio technologies fail closed.
+The Android adapter currently delivers LTE only. GSM/WCDMA parsing is not a claim
+of Android delivery support. No real HiLink/ZTE modem was available for end-to-end
+HTTP testing: schemas, fallback/error handling and interface refusal have fixtures.
+
+Android integration and data protection
+---------------------------------------
+Native .so embeds DEX and installs a Binder wrapper INSIDE com.android.phone.
+Unmodified calls delegate to the original LOCAL Binder on the same thread; real
+caller UID/PID is preserved. Only Navigator and the temporary test probe can obtain
+extra cells. checkPackage plus Android LocationAccessPolicy enforce permissions,
+AppOps, location setting and user checks. A private status transaction is root-only;
+client acknowledgements are authenticated by Binder UID. Raw cells stay in
+/dev/wwan-cells/private/cell.json, root:radio 0640, directory 0750. Status contains
+counts/phase, never raw cell identities. All recurring writes are on tmpfs.
+
+Navigator's process-local PackageManager proxy reports generic telephony support
+and clears its local feature cache. No global feature/SIM capability is added;
+system_server is not injected or edited. No ART patch or Frida runtime is used.
+Android hidden APIs and native arm64 injection remain platform-specific.
+
+Build and checks
+----------------
+  bash tests/test-cells.sh
+  python3 tests/test-at-lock.py
+  bash cells/build-native.sh
+  bash app/build.sh
+
+JDK 11, Android 11 android.jar, d8 and NDK r27d; overrides are in build scripts.
+App signing uses the existing project key. Never create another release identity.
+Build outputs and private HU observations remain ignored, not release assets.
+
+On the HU (root; default WWAN directory):
+  sh /data/local/tmp/wwan/wwan-cells.sh enable|disable|status|auto
+  sh /data/local/tmp/wwan/wwan-cells.sh pause|resume    # payload update only
+  CLASSPATH=/data/local/tmp/wwan/cell-collector.jar app_process /system/bin CellProtocol
+
+The harmless Android lock test uses /dev/null only:
+  sh test-at-lock-device.sh /data/local/tmp/wwan/at-lock.sh
+
+Evidence
+--------
+tests/telephony-results.json and tests/navigator-telephony-results.json record the
+initial native/probe and Navigator tests. tests/coordinator-results.json records
+the coordinated collector and lifecycle validation. No raw cell IDs in tracked
+reports. Private details are under tests/results/lbs-20261021 (ignored).
+Earlier research JS remains source history only; no Frida assets are packaged.

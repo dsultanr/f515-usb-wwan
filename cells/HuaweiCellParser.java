@@ -54,10 +54,10 @@ public final class HuaweiCellParser {
     }
 
     static String field(String response, String prefix) {
-        if (!response.matches("(?s).*\\bOK\\s*.*")) return null;
+        if (!response.matches("(?is).*\\bOK\\s*.*")) return null;
         String value = null;
         for (String line : response.split("\n")) {
-            if (!line.startsWith(prefix)) continue;
+            if (!line.regionMatches(true, 0, prefix, 0, prefix.length())) continue;
             String next = line.substring(prefix.length()).trim();
             if (value != null && !value.equals(next))
                 throw new IllegalArgumentException("ambiguous-response");
