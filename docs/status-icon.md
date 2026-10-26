@@ -126,8 +126,10 @@ sh /data/local/tmp/wwan/tbox-icon.sh fake 2    # нарисовать 2 палк
 У HiLink-модема AT-порта обычно нет, зато есть собственная веб-морда, и её данные
 доступны обычным GET'ом без авторизации:
 
-* Huawei: `http://<шлюз>/api/monitor/status` — XML, `<SignalIcon>` (0..5) и
-  `<CurrentNetworkType>` (19 = LTE);
+* Huawei: `http://<шлюз>/api/monitoring/status` (или `/api/monitor/status`) — XML,
+  `<SignalIcon>` (0..5) и `<CurrentNetworkType>` (19 = LTE). На свежих прошивках
+  модем защищён CSRF-токеном (код ошибки `125002`) — сессия и токен запрашиваются
+  автоматически через `/api/webserver/SesTokInfo`;
 * ZTE: `http://<шлюз>/goform/goform_get_cmd_process?multi_data=1&cmd=signalbar,network_type,rssi`
   — JSON, но **только** с заголовком `Referer` на сам модем, иначе ответа нет.
 

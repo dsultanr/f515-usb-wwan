@@ -895,27 +895,102 @@ public final class TboxWire {
             "/api/monitor/status",
     };
 
+    static class HuaweiSession {
+        final String gw;
+        final String cookie;
+        final String token;
+
+        HuaweiSession(String gw, String cookie, String token) {
+            this.gw = gw;
+            this.cookie = cookie;
+            this.token = token;
+        }
+    }
+
+    static HuaweiSession huaweiSession = null;
+
+    /**
+     * Получает сессию и токен проверки (CSRF) для веб-API Huawei HiLink.
+     * На новых прошивках (E8372, E8278, E5573 и др.) вызовы /api/monitoring/status
+     * без сессии возвращают ошибку 125002.
+     * Эндпоинт /api/webserver/SesTokInfo отдаёт и SessionID, и TokInfo за один вызов.
+     */
+    static HuaweiSession fetchHuaweiSession(String gw) {
+        String body = httpGet("http://" + gw + "/api/webserver/SesTokInfo", gw, null);
+        if (body == null) return null;
+        String ses = xmlTag(body, "SesInfo");
+        String tok = xmlTag(body, "TokInfo");
+        if (ses == null || tok == null) return null;
+        String cookie = ses.trim();
+        int semi = cookie.indexOf(';');
+        if (semi >= 0) cookie = cookie.substring(0, semi).trim();
+        if (!cookie.isEmpty() && !cookie.contains("=")) {
+            cookie = "SessionID=" + cookie;
+        }
+        String token = tok.trim();
+        if (cookie.isEmpty() || token.isEmpty()) return null;
+        return new HuaweiSession(gw, cookie, token);
+    }
+
+    static boolean isHuaweiError(String body, int code) {
+        if (body == null || body.indexOf("<error>") < 0) return false;
+        String c = xmlTag(body, "code");
+        if (c == null) return false;
+        try {
+            return Integer.parseInt(c.trim()) == code;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
     /** @return null, если это не Huawei-API (тогда пробуем следующий). */
     static Sig pollHuawei(String gw, String iface) {
-        String body = null;
-        String path = null;
-        for (int i = 0; i < HUAWEI_STATUS.length; i++) {
-            String b = httpGet("http://" + gw + HUAWEI_STATUS[i], gw);
-            if (b != null && b.indexOf("SignalIcon") >= 0) {
-                body = b;
-                path = HUAWEI_STATUS[i];
-                break;
+        HuaweiSession session = (huaweiSession != null && gw.equals(huaweiSession.gw))
+                ? huaweiSession : null;
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            String body = null;
+            String path = null;
+            boolean needAuth = false;
+
+            for (int i = 0; i < HUAWEI_STATUS.length; i++) {
+                String b = httpGet("http://" + gw + HUAWEI_STATUS[i], gw, session);
+                if (b == null) continue;
+
+                if (isHuaweiError(b, 125002)) {
+                    needAuth = true;
+                    break;
+                }
+                if (b.indexOf("SignalIcon") >= 0) {
+                    body = b;
+                    path = HUAWEI_STATUS[i];
+                    break;
+                }
             }
+
+            if (body != null) {
+                int bars = intOr(xmlTag(body, "SignalIcon"), -1);
+                int netType = intOr(xmlTag(body, "CurrentNetworkType"), -1);
+                String gen = huaweiGeneration(netType);
+                String rat = gen == null ? ("тип сети неизвестен (CurrentNetworkType " + netType + ")") : gen;
+                if (bars < 0) return new Sig(genToReg(gen), STRENGTH_WHEN_UNKNOWN,
+                        "линк " + iface + ", Huawei API без SignalIcon, " + rat);
+                return new Sig(bars > 0 ? genToReg(gen) : REG_NONE, clampBars(bars),
+                        "линк " + iface + ", Huawei API " + gw + path + ": " + bars + "/5, " + rat, true);
+            }
+
+            if (needAuth && attempt == 0) {
+                huaweiSession = fetchHuaweiSession(gw);
+                session = huaweiSession;
+                if (session == null) {
+                    return null;
+                }
+                continue;
+            }
+
+            break;
         }
-        if (body == null) return null;
-        int bars = intOr(xmlTag(body, "SignalIcon"), -1);
-        int netType = intOr(xmlTag(body, "CurrentNetworkType"), -1);
-        String gen = huaweiGeneration(netType);
-        String rat = gen == null ? ("тип сети неизвестен (CurrentNetworkType " + netType + ")") : gen;
-        if (bars < 0) return new Sig(genToReg(gen), STRENGTH_WHEN_UNKNOWN,
-                "линк " + iface + ", Huawei API без SignalIcon, " + rat);
-        return new Sig(bars > 0 ? genToReg(gen) : REG_NONE, clampBars(bars),
-                "линк " + iface + ", Huawei API " + gw + path + ": " + bars + "/5, " + rat, true);
+        return null;
     }
 
     /** @return null, если это не ZTE-API. */
@@ -986,6 +1061,10 @@ public final class TboxWire {
 
     /** GET без авторизации; Referer нужен ZTE, Huawei он не мешает. */
     static String httpGet(String url, String gw) {
+        return httpGet(url, gw, null);
+    }
+
+    static String httpGet(String url, String gw, HuaweiSession session) {
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
@@ -993,6 +1072,14 @@ public final class TboxWire {
             c.setReadTimeout(HTTP_TIMEOUT_MS);
             c.setRequestProperty("Referer", "http://" + gw + "/");
             c.setRequestProperty("Accept", "*/*");
+            if (session != null) {
+                if (session.cookie != null && !session.cookie.isEmpty()) {
+                    c.setRequestProperty("Cookie", session.cookie);
+                }
+                if (session.token != null && !session.token.isEmpty()) {
+                    c.setRequestProperty("__RequestVerificationToken", session.token);
+                }
+            }
             if (c.getResponseCode() != 200) return null;
             java.io.BufferedReader br = new java.io.BufferedReader(
                     new java.io.InputStreamReader(c.getInputStream(), "UTF-8"));
@@ -1010,7 +1097,7 @@ public final class TboxWire {
 
     static String xmlTag(String body, String tag) {
         java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                "<" + tag + ">([^<]*)</" + tag + ">").matcher(body);
+                "<" + tag + "(?:\\s+[^>]*)?>([^<]*)</" + tag + ">").matcher(body);
         return m.find() ? m.group(1).trim() : null;
     }
 
@@ -1053,7 +1140,14 @@ public final class TboxWire {
             say("шлюз модема: " + gw);
             if (gw != null) {
                 for (int i = 0; i < HUAWEI_STATUS.length; i++) {
-                    String h = httpGet("http://" + gw + HUAWEI_STATUS[i], gw);
+                    String h = httpGet("http://" + gw + HUAWEI_STATUS[i], gw, huaweiSession);
+                    if (isHuaweiError(h, 125002)) {
+                        HuaweiSession s = fetchHuaweiSession(gw);
+                        if (s != null) {
+                            huaweiSession = s;
+                            h = httpGet("http://" + gw + HUAWEI_STATUS[i], gw, huaweiSession);
+                        }
+                    }
                     say("Huawei " + HUAWEI_STATUS[i] + ": " + (h == null ? "нет ответа" : h));
                 }
                 String z = httpGet("http://" + gw
