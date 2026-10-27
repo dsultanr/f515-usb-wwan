@@ -259,6 +259,16 @@ public class MainActivity extends Activity {
         }
         if (!lastOk.isEmpty()) msg.append("Последний удачный подъём: ").append(lastOk).append('\n');
         msg.append("Незавершённых заходов: ").append(attempts).append(" из ").append(maxAttempts).append('\n');
+        // Голова неделями только спит и просыпается, BOOT_COMPLETED не приходит, и
+        // сторожа, кроме него самого, поднять некому. Включённый автозапуск без
+        // живого сторожа — это «связь после сна не поднимется», а не мелочь в строке
+        // выше (2026-10-27: выключили-включили автозапуск утром, в обед сети не было).
+        final boolean orphaned = enabled && !blocked && !watchdog;
+        if (orphaned) {
+            msg.append("\nВНИМАНИЕ: автозапуск включен, но watchdog не работает — после сна ")
+                    .append("связь сама не поднимется, пока голова не перезагрузится. ")
+                    .append("Нажмите «Запустить сейчас».\n");
+        }
         if (blocked) {
             msg.append("\nБЕЗОПАСНЫЙ РЕЖИМ: автозапуск заблокирован на голове.\n")
                     .append(reason).append('\n')
@@ -287,6 +297,17 @@ public class MainActivity extends Activity {
                     Autostart.setEnabled(MainActivity.this, true);
                     append("автозапуск включен: после перезагрузки модем поднимется сам");
                     append("(защита от бутлупа — см. docs/autostart.md)");
+                    // «Выключить» сторожа останавливает, значит «Включить» обязано его
+                    // вернуть: перезагрузки, которая сделала бы это сама, можно не
+                    // дождаться неделями. Безопасный режим не обходим — там решает человек.
+                    if (!blocked && !watchdog) {
+                        runInBackground("> запускаю wwan-boot.sh (подъём + watchdog)...", new Job() {
+                            @Override
+                            public void run(Keeper.Progress p) {
+                                Keeper.startAutostart(MainActivity.this, true, p);
+                            }
+                        });
+                    }
                 }
             });
         }
