@@ -68,6 +68,12 @@ AT_WAIT_SECS=${WWAN_AT_WAIT_SECS:-20}
 # Запасные значения для hilink-ветки, если DHCP почему-то ничего не отдал.
 HILINK_ADDR=${WWAN_HILINK_ADDR:-192.168.0.178}
 HILINK_GW=${WWAN_HILINK_GW:-192.168.0.1}
+# Сколько раз спросить DHCP, прежде чем брать запасной адрес, и сколько секунд
+# ждать, пока HiLink-роутер зарегистрируется в сети (адрес он отдаёт раньше).
+HILINK_DHCP_TRIES=${WWAN_HILINK_DHCP_TRIES:-3}
+HILINK_NET_WAIT=${WWAN_HILINK_NET_WAIT:-60}
+# Сколько ждать, пока ZTE в storage-режиме переключится сам (обычно ~5 с).
+ZTE_SWITCH_WAIT=${WWAN_ZTE_SWITCH_WAIT:-30}
 # Метрика default'а Wi-Fi в main. Должна быть ЛУЧШЕ (меньше) модемной двадцатки:
 # модем — резерв, а не основной канал. Ноль не берём, чтобы отличать наш маршрут
 # от чужих.
@@ -505,6 +511,26 @@ is_storage_pid() {
 	case "$1" in
 	14fe | 1f01 | 1f02 | 1446 | 14ad | 1c0b | 1c1b) return 0 ;;
 	esac
+	return 1
+}
+
+# ZTE-роутеры (MF79, MF833 и родня) тоже приходят на шину флешкой, но
+# переключаются сами — modeswitch им не нужен, нужно только подождать. Без этого
+# первый заход после каждого холодного старта кончался «модем не найден»
+# (2026-10-26/27, 19d2:1225 "ZTE Technologies MSM": через 5 с на его месте уже eth1).
+is_zte_storage_pid() {
+	case "$1" in
+	2000 | 1224 | 1225) return 0 ;;
+	esac
+	return 1
+}
+
+find_zte_storage() {
+	for d in /sys/bus/usb/devices/*; do
+		[ "$(cat "$d/idVendor" 2>/dev/null)" = 19d2 ] || continue
+		ZTE_PID=$(cat "$d/idProduct" 2>/dev/null)
+		is_zte_storage_pid "$ZTE_PID" && return 0
+	done
 	return 1
 }
 
@@ -1584,7 +1610,27 @@ fi
 stage "режим модема"
 NEED_SWITCH=0
 if ! find_usb_dev; then
-	skip "Huawei (12d1:*) на шине нет — переключать нечего"
+	if find_zte_storage && ! find_hilink_iface; then
+		if [ "$CHECK_ONLY" = 1 ]; then
+			warn "ZTE (19d2:$ZTE_PID) в storage-режиме — переключится сам"
+		else
+			warn "ZTE (19d2:$ZTE_PID) в storage-режиме — жду, пока переключится сам"
+			i=0
+			while [ $i -lt "$ZTE_SWITCH_WAIT" ]; do
+				find_hilink_iface && break
+				find_zte_storage || { find_rndis_iface && break; }
+				sleep 1
+				i=$((i + 1))
+			done
+			if find_zte_storage; then
+				warn "за $ZTE_SWITCH_WAIT с так и не переключился — идём дальше как есть"
+			else
+				ok "ZTE переключился ($i с)"
+			fi
+		fi
+	else
+		skip "Huawei (12d1:*) на шине нет — переключать нечего"
+	fi
 else
 	MODESWITCH=${WWAN_MODESWITCH:-$(mod_dir huawei-modeswitch)/huawei-modeswitch}
 	if is_storage_pid "$USB_PID"; then
@@ -1803,9 +1849,19 @@ if [ "$MODE" = hilink ]; then
 		# вывод и настраиваем интерфейс руками.
 		have busybox || die "нет busybox — нечем взять DHCP-аренду" \
 			"задай адрес вручную: WWAN_HILINK_ADDR/WWAN_HILINK_GW"
-		LEASE=$(busybox udhcpc -i "$WAN_IF" -q -n -f 2>&1)
-		ADDR=$(echo "$LEASE" | sed -n 's/.*lease of \([0-9.]*\) obtained from \([0-9.]*\).*/\1/p' | tail -1)
-		GW=$(echo "$LEASE" | sed -n 's/.*lease of \([0-9.]*\) obtained from \([0-9.]*\).*/\2/p' | tail -1)
+		# Свежевключённый модем поднимает свой DHCP-сервер секунд через 10–15 после
+		# появления интерфейса, а один заход udhcpc сдаётся быстрее. Запасной адрес
+		# при этом работает, но потом DHCP выдаёт другой, и у интерфейса их два —
+		# поэтому сначала даём DHCP ещё пару шансов.
+		_dh=0
+		while :; do
+			LEASE=$(busybox udhcpc -i "$WAN_IF" -q -n -f 2>&1)
+			ADDR=$(echo "$LEASE" | sed -n 's/.*lease of \([0-9.]*\) obtained from \([0-9.]*\).*/\1/p' | tail -1)
+			GW=$(echo "$LEASE" | sed -n 's/.*lease of \([0-9.]*\) obtained from \([0-9.]*\).*/\2/p' | tail -1)
+			_dh=$((_dh + 1))
+			[ -n "$ADDR" ] || [ "$_dh" -ge "$HILINK_DHCP_TRIES" ] && break
+			say "   DHCP пока молчит (заход $_dh/$HILINK_DHCP_TRIES), повторяю"
+		done
 		if [ -z "$ADDR" ]; then
 			warn "DHCP молчит, беру запасной адрес $HILINK_ADDR/$HILINK_GW"
 			ADDR=$HILINK_ADDR
@@ -2152,7 +2208,24 @@ else
 	ok "маршрут по умолчанию для $WAN_IF в таблице $TABLE"
 
 	if [ "$CHECK_ONLY" = 0 ]; then
-		if ping -c 2 -W 4 -I "$WAN_IF" "$CHECK_HOST" >/dev/null 2>&1; then
+		_pw_t0=$(cut -d. -f1 /proc/uptime)
+		_pw=0
+		_net_ok=0
+		while :; do
+			if ping -c 2 -W 4 -I "$WAN_IF" "$CHECK_HOST" >/dev/null 2>&1; then
+				_net_ok=1
+				break
+			fi
+			# HiLink-роутер отдаёт адрес раньше, чем регистрируется в сети оператора:
+			# после холодного старта до минуты «адрес есть, интернета нет». Сдаться
+			# сразу значило отдать дело сторожу, а тот вернётся только через минуту.
+			[ "$MODE" = hilink ] && [ "$_pw" -lt "$HILINK_NET_WAIT" ] || break
+			[ "$_pw" = 0 ] && say "   связи пока нет — жду регистрации модема в сети (до $HILINK_NET_WAIT с)"
+			sleep 3
+			_pw=$(( $(cut -d. -f1 /proc/uptime) - _pw_t0 ))
+		done
+		[ "$_net_ok" = 1 ] && [ "$_pw" -gt 0 ] && say "   связь появилась через $_pw с"
+		if [ "$_net_ok" = 1 ]; then
 			ok "связь есть (ping $CHECK_HOST через $WAN_IF)"
 		else
 			warn "$WAN_IF поднят, но ping $CHECK_HOST не проходит"
