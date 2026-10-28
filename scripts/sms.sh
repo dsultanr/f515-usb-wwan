@@ -1,8 +1,17 @@
 #!/system/bin/sh
-# scripts/sms.sh — чтение и управление SMS через AT-порт USB-модема (PPP / AT-режим).
+# scripts/sms.sh — чтение и управление SMS. Диспетчер: stick-модем (PPP/AT) —
+# через AT-порт (см. ниже), HiLink — через sms-hilink.sh (Web API модема).
 set -e
 
 DIR=$(cd "$(dirname "$0")" && pwd)
+
+# HiLink-модем (E8278, E8372 и родня) SMS отдаёт не AT-портом, а Web API
+# роутера; тип определил wwan-up.sh и сохранил в state/mode — переключаем
+# ветку целиком, аргументы передаются как есть.
+if [ "$(cat "$DIR/state/mode" 2>/dev/null | tr -d '\r')" = hilink ]; then
+	exec sh "$DIR/sms-hilink.sh" "$@"
+fi
+
 ACTION="${1:-list}"
 TARGET_ID="${2:-}"
 LOCKED=0
