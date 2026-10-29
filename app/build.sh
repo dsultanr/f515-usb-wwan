@@ -26,7 +26,7 @@ echo "== assets (scripts + modules + tools)"
 for f in "$ROOT"/scripts/wwan-up.sh "$ROOT"/scripts/wwan-boot.sh \
          "$ROOT"/scripts/dial.sh "$ROOT"/scripts/at-lock.sh "$ROOT"/scripts/at.sh "$ROOT"/scripts/format-sdcard.sh \
          "$ROOT"/scripts/tbox-icon.sh \
-         "$ROOT"/scripts/sms.sh "$ROOT"/scripts/wwan-cells.sh \
+         "$ROOT"/scripts/sms.sh "$ROOT"/scripts/sms-hilink.sh "$ROOT"/scripts/wwan-cells.sh \
          "$ROOT"/tbox/prebuilt/tboxwire.jar \
          "$ROOT"/tools/huawei-modeswitch \
          "$ROOT"/modules/prebuilt/usbserialmerged2.ko "$ROOT"/modules/prebuilt/ppp_async.ko \

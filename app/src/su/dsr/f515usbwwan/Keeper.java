@@ -49,6 +49,7 @@ public class Keeper {
             {"format-sdcard.sh", "format-sdcard.sh", Boolean.TRUE},
             {"tbox-icon.sh", "tbox-icon.sh", Boolean.TRUE},
             {"sms.sh", "sms.sh", Boolean.TRUE},
+            {"sms-hilink.sh", "sms-hilink.sh", Boolean.TRUE},
             {"wwan-cells.sh", "wwan-cells.sh", Boolean.TRUE},
             {"cell-native-inject", "cell-native-inject", Boolean.TRUE},
             {"libwwan_cells.so", "libwwan_cells.so", Boolean.FALSE},

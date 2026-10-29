@@ -359,7 +359,15 @@ public class MainActivity extends Activity {
                 final List<SmsHelper.SmsMessage> list = SmsHelper.readAll(MainActivity.this, new Keeper.Progress() {
                     @Override
                     public void onLine(String line) {
-                        // Не спамим сырым выводом в общий лог экрана
+                        // Показываем только служебные строки скрипта (маркеры
+                        // say/ok/warn/err/dbg из sms.sh и sms-hilink.sh:
+                        // "[...]", "[http] ...", "== ..."), а не сырые данные
+                        // +CMGL и тексты сообщений. Ведущие пробелы стилей
+                        // ("   [ ok ] ...") обрезаем перед проверкой.
+                        String lt = line.trim();
+                        if (lt.startsWith("[") || lt.startsWith("==")) {
+                            post(line);
+                        }
                     }
                 });
                 ui.post(new Runnable() {
@@ -434,8 +442,8 @@ public class MainActivity extends Activity {
                         runInBackground("> Удаляю все SMS...", new Job() {
                             @Override
                             public void run(Keeper.Progress p) {
-                                SmsHelper.deleteAll(MainActivity.this, p);
-                                p.onLine("\n> Все SMS удалены");
+                                String out = SmsHelper.deleteAll(MainActivity.this, p);
+                                p.onLine("\n> Итог: " + summaryLine(out));
                             }
                         });
                     }
@@ -1253,5 +1261,18 @@ public class MainActivity extends Activity {
 
     private void append(String text) {
         log.append(text + "\n");
+    }
+
+    /** Последний вердикт скрипта ([ ok ]/[FAIL]) из всего его вывода. */
+    private static String summaryLine(String out) {
+        if (out == null || out.trim().isEmpty()) return "нет ответа от скрипта";
+        String[] ls = out.split("\n");
+        for (int i = ls.length - 1; i >= 0; i--) {
+            String t = ls[i].trim();
+            if (t.startsWith("[ ok ]") || t.startsWith("[FAIL]") || t.startsWith("OK:")) {
+                return t;
+            }
+        }
+        return ls[ls.length - 1].trim();
     }
 }

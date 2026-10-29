@@ -1,8 +1,29 @@
 #!/system/bin/sh
-# scripts/sms.sh — чтение и управление SMS через AT-порт USB-модема (PPP / AT-режим).
+# scripts/sms.sh — чтение и управление SMS. Диспетчер: stick-модем (PPP/AT) —
+# через AT-порт (см. ниже), HiLink — через sms-hilink.sh (Web API модема).
 set -e
 
 DIR=$(cd "$(dirname "$0")" && pwd)
+
+# Логи, как в wwan-up.sh: на экран приложения (stdout скрипта Keeper отдаёт
+# построчно в окно) и в общий файл /data/local/tmp/wwan.log.
+LOG=${WWAN_LOG:-/data/local/tmp/wwan.log}
+say()  { echo "$*"; echo "$(date '+%F %T') $*" >>"$LOG" 2>/dev/null; }
+ok()   { say "   [ ok ] $*"; }
+warn() { say "   [warn] $*"; }
+# Ошибка — в stderr (у Keeper 2>&1, так что тоже попадает в окно) и в файл.
+err()  { echo "   [FAIL] $*" >&2; echo "$(date '+%F %T')   [FAIL] $*" >>"$LOG" 2>/dev/null; }
+
+# HiLink-модем (E8278, E8372 и родня) SMS отдаёт не AT-портом, а Web API
+# роутера; тип определил wwan-up.sh и сохранил в state/mode — переключаем
+# ветку целиком, аргументы передаются как есть.
+MODE_SMS=$(cat "$DIR/state/mode" 2>/dev/null | tr -d '\r')
+if [ "$MODE_SMS" = hilink ]; then
+	say "==== SMS: тип модема hilink — читаю через Web API: $DIR/sms-hilink.sh"
+	exec sh "$DIR/sms-hilink.sh" "$@"
+fi
+say "==== SMS: тип модема: ${MODE_SMS:-не определён (нет state/mode)} — ветка AT/PPP"
+
 ACTION="${1:-list}"
 TARGET_ID="${2:-}"
 LOCKED=0
@@ -42,15 +63,18 @@ find_at_port() {
 
 [ "$LOCKED" = 1 ] || PORT=$(find_at_port) || PORT=
 if [ -z "$PORT" ] || [ ! -c "$PORT" ]; then
-	echo "ERROR: Не найден свободный AT-порт модема (ttyUSB)"
+	err "не найден свободный AT-порт модема (ttyUSB)"
+	err "если модем с HiLink-прошивкой — проверь state/mode: его пишет wwan-up.sh при реальном подъёме (кнопка Включить), а не в --check"
 	exit 1
 fi
+ok "AT-порт: $PORT"
 
 if [ "$LOCKED" = 0 ]; then
 	exec sh "$DIR/at-lock.sh" "$PORT" 15 sh "$0" --locked "$PORT" "$ACTION" "$TARGET_ID"
 fi
 
 stty -F "$PORT" raw -echo -iuclc min 0 time 5 >/dev/null 2>&1 || true
+ok "действие: $ACTION${TARGET_ID:+ (индекс $TARGET_ID)} на $PORT"
 
 case "$ACTION" in
 list)
@@ -81,7 +105,7 @@ list)
 
 delete)
 	if [ -z "$TARGET_ID" ]; then
-		echo "ERROR: Укажите индекс SMS для удаления"
+		err "укажите индекс SMS для удаления"
 		exit 1
 	fi
 	timeout --foreground 5 sh -c '
