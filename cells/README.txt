@@ -63,7 +63,9 @@ our readers; unmodified external AT tools do not automatically participate.
 HTTP-only Huawei HiLink and ZTE use their read-only APIs. Requests bind to the
 validated USB modem interface and its directly attached private IPv4 gateway,
 ignore proxy environment settings, do not follow redirects and have size/time
-limits. Huawei session/token support uses SesTokInfo without password guessing.
+limits. Huawei session/token support uses SesTokInfo without password guessing; a fresh
+session/token is fetched before every HiLink request because some firmware makes
+the token single-use.
 Unsupported signal endpoints fall back to the other supported endpoints. Missing
 full cell identity is "http-cell-unsupported", not a fabricated cell from bars or
 operator names. Authentication errors are distinct. ZTE cell_id AND lac_code are
