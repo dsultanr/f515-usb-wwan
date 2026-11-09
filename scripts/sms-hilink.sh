@@ -238,25 +238,13 @@ sms_list_body() {
 	printf '<?xml version="1.0" encoding="UTF-8"?><request><PageIndex>%s</PageIndex><ReadCount>50</ReadCount><BoxType>1</BoxType><SortType>0</SortType><Ascending>0</Ascending><UnreadPreferred>0</UnreadPreferred></request>' "$1"
 }
 
-# Хитрость прошивок: если в сообщении есть символы вне ISO-8859-1 (кириллица
-# и т.п.), <Content> приходит в base64. Явного признака нет, поэтому декодируем
-# строки из алфавита base64 с длиной, кратной 4 и длиной >= 8 — короткий
-# ASCII-текст вроде "OK" или "Test" не заденешь.
-maybe_decode() {
-	local s="$1" d
-	case "$s" in
-	''|*[!A-Za-z0-9+/=]*) echo "$s"; return ;;
-	esac
-	if [ $(( ${#s} % 4 )) -eq 0 ] && [ ${#s} -ge 8 ]; then
-		d=$(printf '%s' "$s" | base64 -d 2>/dev/null) && { echo "$d"; return; }
-	fi
-	echo "$s"
-}
-
 # Печать одной страницы ответа sms-list в формате +CMGL (text-mode):
-#   +CMGL: <index>,<stat>,"<phone>",,"<date>",<len>
+#   +CMGL: <index>,<stat>,"<phone>",,"<date>",<len>,text
 #   <content>
 # stat: 0 = непрочитано, 1 = прочитано (как в AT-ветке). Читает глобальный RESP.
+# Последнее поле "text" говорит приложению, что тело — обычный текст, а не
+# PDU/hex/base64: угадывать кодировку по виду строки нельзя (код вида
+# 12345678 или ABCD1234 принимался бы за base64/hex и портился).
 page_messages() {
 	local flat
 	flat=$(printf '%s' "$RESP" | tr -d '\r')
@@ -267,13 +255,8 @@ page_messages() {
 		inmsg && /<Date>/    { v=$0; sub(/.*<Date>/,"",v);    sub(/<\/Date>.*/,"",v);    gsub(/^[ \t]+|[ \t]+$/,"",v); cdate=v; next }
 		inmsg && /<Content>/ { v=$0; sub(/.*<Content>/,"",v); sub(/<\/Content>.*/,"",v); content=v; next }
 		inmsg && /<Smstat>/  { v=$0; sub(/.*<Smstat>/,"",v);  sub(/<\/Smstat>.*/,"",v);  gsub(/^[ \t]+|[ \t]+$/,"",v); stat=v; next }
-		/<\/Message>/ { if (idx != "") { printf "+CMGL: %s,%s,\"%s\",,\"%s\",%d\n", idx, stat, phone, cdate, length(content); print content } inmsg=0; next }
-	' | while IFS= read -r l; do
-		case "$l" in
-		+CMGL:*) echo "$l" ;;
-		*) maybe_decode "$l" ;;
-		esac
-	done
+		/<\/Message>/ { if (idx != "") { printf "+CMGL: %s,%s,\"%s\",,\"%s\",%d,text\n", idx, stat, phone, cdate, length(content); print content } inmsg=0; next }
+	'
 }
 
 # Хелпер delete_all: собрать индексы текущей страницы в глобальный PAGE_IDS.

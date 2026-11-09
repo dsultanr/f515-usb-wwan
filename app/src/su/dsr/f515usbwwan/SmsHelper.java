@@ -93,6 +93,10 @@ public class SmsHelper {
             if (line.startsWith("+CMGL:")) {
                 String header = line.substring(6).trim();
                 String[] parts = header.split(",");
+                // Седьмое поле "text" ставит HiLink-ветка (sms-hilink.sh): тело —
+                // обычный текст, а не PDU. Только тогда не угадываем кодировку.
+                boolean plainText = parts.length >= 7
+                        && "text".equals(parts[6].trim().replace("\"", ""));
                 int lastIndex = -1;
                 boolean lastUnread = false;
                 if (parts.length >= 2) {
@@ -105,24 +109,30 @@ public class SmsHelper {
                     }
                 }
 
-                // Ищем следующую непустую строку (тело PDU или текст)
+                // HiLink печатает тело сразу после заголовка, даже пустое;
+                // в AT-режиме пустые строки — разделители.
                 i++;
-                while (i < lines.length && lines[i].trim().isEmpty()) {
-                    i++;
+                if (!plainText) {
+                    while (i < lines.length && lines[i].trim().isEmpty()) {
+                        i++;
+                    }
                 }
 
                 if (i < lines.length) {
                     String pduLine = lines[i].trim();
-                    if (!pduLine.equals("OK") && !pduLine.startsWith("+CMGL:")) {
+                    boolean nextHeader = !plainText
+                            && (pduLine.equals("OK") || pduLine.startsWith("+CMGL:"));
+                    if (!nextHeader) {
                         SmsMessage msg = null;
-                        if (isHex(pduLine) && pduLine.length() >= 20) {
+                        if (!plainText && isHex(pduLine) && pduLine.length() >= 20) {
                             msg = decodePdu(lastIndex, pduLine, lastUnread);
                         }
                         if (msg == null) {
                             // Fallback для Text-mode
                             String sender = parts.length >= 3 ? parts[2].replace("\"", "").trim() : "Неизвестный";
                             String ts = parts.length >= 5 ? parts[4].replace("\"", "").trim() : "";
-                            msg = new SmsMessage(lastIndex, sender, ts, decodeIfHexUcs2(pduLine), lastUnread);
+                            msg = new SmsMessage(lastIndex, sender, ts,
+                                    plainText ? pduLine : decodeIfHexUcs2(pduLine), lastUnread);
                         }
                         if (msg != null && !msg.text.isEmpty() && !containsIndex(result, msg.index, msg.text)) {
                             result.add(msg);
