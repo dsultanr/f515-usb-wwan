@@ -3,16 +3,21 @@
 #
 # У HiLink-прошивки (E8278, E8372, E3372h в NCM-режиме и родня) нет рабочего
 # AT-порта: модем отдаёт себя сетевой картой (NCM/RNDIS) и роутером с
-# веб-интерфейсом. SMS читаются и удаляются по HTTP API (все эндпоинты ниже):
+# веб-интерфейсом. SMS читаются и удаляются по HTTP API:
 #
 #   GET  /api/webserver/SesTokInfo     сессия: SesInfo + TokInfo
 #   POST /api/sms/sms-list             список сообщений (BoxType=1 — входящие)
 #   POST /api/sms/delete-sms           удалить одну  (<Index>N</Index>)
-#   POST /api/sms/delete-sms-list      удалить много (<Index>1,2,3</Index>)
 #
-# Каждый запрос, кроме SesTokInfo, должен нести два заголовка:
-#   Cookie: SessionID=<SesInfo>
-#   __RequestVerificationToken: <TokInfo>
+# Особенности прошивки, учтённые здесь:
+#   - <SesInfo> может содержать готовый Cookie-заголовок ("SessionID=...") —
+#     префикс не дублируем, иначе модем отвечает 125002;
+#   - токен одноразовый/быстро протухает — сессия обновляется перед каждым
+#     изменяющим запросом (refresh_session);
+#   - изменяющие запросы требуют Origin/Referer/User-Agent как у веб-интерфейса,
+#     иначе модем отвечает 125003;
+#   - массовый delete-sms-list не поддерживается (125003) — удаляем по одному;
+#   - errorcode 108001 — требуется логин (POST /api/user/login, см. ниже).
 #
 # Если прошивка отвечает errorcode 108001 (требуется логин), SMS-эндпоинтам
 # нужен предварительный POST /api/user/login с
@@ -31,25 +36,123 @@ if [ "$ACTION" = delete ]; then
 	case "$TARGET_ID" in ''|*[!0-9]*) echo 'Invalid SMS index'; exit 2 ;; esac
 fi
 
+# Логи, как в wwan-up.sh / sms.sh: на экран приложения (stdout скрипта Keeper
+# отдаёт построчно в окно) и в общий файл /data/local/tmp/wwan.log. Данные
+# чтения (+CMGL:/текст сообщений) печатаются обычным echo и в файл не дублируются.
+LOG=${WWAN_LOG:-/data/local/tmp/wwan.log}
+say()  { echo "$*"; echo "$(date '+%F %T') $*" >>"$LOG" 2>/dev/null; }
+ok()   { say "   [ ok ] $*"; }
+warn() { say "   [warn] $*"; }
+# Ошибка — в stderr (у Keeper 2>&1, тоже в окно) и в файл.
+err()  { echo "   [FAIL] $*" >&2; echo "$(date '+%F %T')   [FAIL] $*" >>"$LOG" 2>/dev/null; }
+
+# Код ошибки из XML-ответа модема (<error><code>N</code>...).
+err_code() { printf '%s' "$1" | grep -o '<code>[0-9]*</code>' | sed 's:<code>::;s:</code>::' | head -1; }
+
+# Cookie-файл для curl (-c/-b) и файл заголовков ответа.
+mkdir -p "$DIR/state" 2>/dev/null
+CK="$DIR/state/hilink-cookies"
+CK_HEADER="$DIR/state/hilink-cookies.header"
+
+# Заголовки как у веб-интерфейса модема (эталон из DevTools Firefox). Без них
+# модем заводит «неполную» сессию: чтение работает, а удаление отвечает 125003.
+UA_BROWSER="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Gecko/20100101 Firefox/128.0"
+
+say "==== sms-hilink.sh: действие=$ACTION${TARGET_ID:+ индекс=$TARGET_ID}"
+
 # ---------------------------------------------------------------------------
 # HTTP-клиент. curl есть в Android (/system/bin/curl); wget (toybox) — запасной.
 # HDR_COOKIE/HDR_TOKEN заполняются ниже, после получения сессии; функции
-# читают их в момент вызова.
+# читают их в момент вызова. Тело ответа отдаётся ТОЛЬКО на stdout (его забирает
+# $(...) — иначе RESP был бы засорён логами). Код возврата curl/wget сохраняется.
 # ---------------------------------------------------------------------------
 if command -v curl >/dev/null 2>&1; then
-	http_session() { curl -s --max-time 5 "$1"; }
-	http_get() { curl -s --max-time 10 -H "$HDR_COOKIE" -H "$HDR_TOKEN" "$1"; }
-	http_post() { curl -s --max-time 10 -X POST \
-		-H "$HDR_COOKIE" -H "$HDR_TOKEN" \
-		-H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
-		--data "$2" "$1"; }
+	# SesTokInfo: сохраняем Set-Cookie (-c) и заголовки ответа (-D).
+	http_session() {
+		local _r _o
+		# Сессию создаём с теми же Origin/Referer/UA, что и веб-интерфейс.
+		# Origin берём из URL: на момент пробы шлюз ещё неизвестен.
+		_o=$(printf '%s' "$1" | sed -n 's|\(http://[^/]*\).*|\1|p')
+		_r=$(curl -s --max-time 5 -D "$CK_HEADER" -c "$CK" \
+			-H "Origin: $_o" \
+			-H "Referer: $_o/html/index.html" \
+			-H "User-Agent: $UA_BROWSER" \
+			"$1"); _rc=$?
+		printf '%s' "$_r"
+		return $_rc
+	}
+	# Остальные запросы: COOKIE_MODE выбирает, чем слать сессию — cookie-файлом
+	# (-b, Set-Cookie c модема) или ручным заголовком из <SesInfo> тела.
+	http_get() {
+		local _r
+		if [ "$COOKIE_MODE" = jar ]; then
+			_r=$(curl -s --max-time 10 -b "$CK" -H "$HDR_TOKEN" \
+				-H "Origin: http://$GW" \
+				-H "Referer: http://$GW/html/smsinbox.html" \
+				-H "User-Agent: $UA_BROWSER" "$1"); _rc=$?
+		else
+			_r=$(curl -s --max-time 10 -H "$HDR_COOKIE" -H "$HDR_TOKEN" \
+				-H "Origin: http://$GW" \
+				-H "Referer: http://$GW/html/smsinbox.html" \
+				-H "User-Agent: $UA_BROWSER" "$1"); _rc=$?
+		fi
+		printf '%s' "$_r"
+		return $_rc
+	}
+	http_post() {
+		local _r
+		# Заголовки ровно как у веб-интерфейса модема (эталон из DevTools):
+		# Origin + Referer на страницу SMS. Без них модем режет изменяющие
+		# запросы (delete-sms и т.п.) ошибкой 125003, хотя sms-list проходит.
+		if [ "$COOKIE_MODE" = jar ]; then
+			_r=$(curl -s --max-time 10 -X POST -b "$CK" -H "$HDR_TOKEN" \
+				-H "Origin: http://$GW" \
+				-H "Referer: http://$GW/html/smsinbox.html" \
+				-H "User-Agent: $UA_BROWSER" \
+				-H "X-Requested-With: XMLHttpRequest" \
+				-H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+				--data "$2" "$1"); _rc=$?
+		else
+			_r=$(curl -s --max-time 10 -X POST -H "$HDR_COOKIE" -H "$HDR_TOKEN" \
+				-H "Origin: http://$GW" \
+				-H "Referer: http://$GW/html/smsinbox.html" \
+				-H "User-Agent: $UA_BROWSER" \
+				-H "X-Requested-With: XMLHttpRequest" \
+				-H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+				--data "$2" "$1"); _rc=$?
+		fi
+		printf '%s' "$_r"
+		return $_rc
+	}
 else
-	http_session() { wget -q -O - "$1"; }
-	http_get() { wget -q -O - --header "$HDR_COOKIE" --header "$HDR_TOKEN" "$1"; }
-	http_post() { wget -q -O - \
-		--header "$HDR_COOKIE" --header "$HDR_TOKEN" \
-		--header "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
-		--post-data "$2" "$1"; }
+	http_session() {
+		local _r
+		_r=$(wget -q -O - "$1"); _rc=$?
+		printf '%s' "$_r"
+		return $_rc
+	}
+	http_get() {
+		local _r
+		_r=$(wget -q -O - --header "$HDR_COOKIE" --header "$HDR_TOKEN" \
+			--header "Origin: http://$GW" \
+			--header "Referer: http://$GW/html/smsinbox.html" \
+			--header "User-Agent: $UA_BROWSER" "$1"); _rc=$?
+		printf '%s' "$_r"
+		return $_rc
+	}
+	http_post() {
+		local _r
+		_r=$(wget -q -O - \
+			--header "$HDR_COOKIE" --header "$HDR_TOKEN" \
+			--header "Origin: http://$GW" \
+			--header "Referer: http://$GW/html/smsinbox.html" \
+			--header "User-Agent: $UA_BROWSER" \
+			--header "X-Requested-With: XMLHttpRequest" \
+			--header "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+			--post-data "$2" "$1"); _rc=$?
+		printf '%s' "$_r"
+		return $_rc
+	}
 fi
 
 is_error() { printf '%s' "$1" | grep -q '<error>'; }
@@ -76,7 +179,12 @@ find_gw() {
 	return 1
 }
 
-GW=$(find_gw) || { echo "ERROR: не найден веб-интерфейс HiLink-модема"; exit 1; }
+GW=$(find_gw) || {
+	err "не найден веб-интерфейс HiLink-модема"
+	err "проверь: модем поднят (wwan-up.sh), есть маршрут до шлюза, curl/wget отвечает на http://<gw>/api/webserver/SesTokInfo"
+	exit 1
+}
+ok "шлюз: $GW"
 
 # Сессия: SesInfo идёт в Cookie, TokInfo — в __RequestVerificationToken.
 # Ответ может прийти и в одну строку, и в несколько, и с CRLF — нормализуем.
@@ -85,13 +193,46 @@ get_session() {
 	resp=$(http_session "http://$GW/api/webserver/SesTokInfo") || return 1
 	flat=$(printf '%s' "$resp" | tr -d '\r\n')
 	is_error "$flat" && return 1
-	SES=$(printf '%s' "$flat" | sed -n 's:.*<SesInfo>\([^<]*\)</SesInfo>.*:\1:p')
-	TOK=$(printf '%s' "$flat" | sed -n 's:.*<TokInfo>\([^<]*\)</TokInfo>.*:\1:p')
+	SES=$(printf '%s' "$flat" | grep -o '<SesInfo>[^<]*</SesInfo>' | sed 's:<SesInfo>::;s:</SesInfo>::' | head -1)
+	TOK=$(printf '%s' "$flat" | grep -o '<TokInfo>[^<]*</TokInfo>' | sed 's:<TokInfo>::;s:</TokInfo>::' | head -1)
 	[ -n "$SES" ] && [ -n "$TOK" ]
 }
-get_session || { echo "ERROR: SesTokInfo не получен с http://$GW"; exit 1; }
-HDR_COOKIE="Cookie: SessionID=$SES"
-HDR_TOKEN="__RequestVerificationToken: $TOK"
+
+# Собрать заголовки из свежих SES/TOK. Вызывается и при старте, и при каждом
+# обновлении сессии перед удалением.
+apply_session() {
+	# Нормализация Cookie: на части прошивок <SesInfo> уже содержит готовый
+	# Cookie-заголовок целиком ("SessionID=qS8/AW..."), на других — только голый
+	# токен ("1f2e3d4c..."). Префикс не дублируем: "Cookie: SessionID=SessionID=..."
+	# даёт модему 125002 (Session error).
+	case "$SES" in
+	SessionID=*) HDR_COOKIE="Cookie: $SES" ;;
+	*)           HDR_COOKIE="Cookie: SessionID=$SES" ;;
+	esac
+	HDR_TOKEN="__RequestVerificationToken: $TOK"
+	# Если модем отдал SessionID в Set-Cookie (ответ попал в cookie-файл),
+	# ходим через jar (-b) — это то, что модем считает настоящей сессией.
+	# Если Set-Cookie нет — фолбэк на ручной заголовок $HDR_COOKIE.
+	rm -f "$CK_HEADER"
+	if [ -s "$CK" ] && grep -qs 'SessionID' "$CK"; then
+		COOKIE_MODE=jar
+	else
+		COOKIE_MODE=manual
+	fi
+}
+
+# Токен на этой прошивке одноразовый/быстро протухает — перед каждым
+# изменяющим запросом перевызываем SesTokInfo и пересобираем заголовки.
+# Cookie-файл чистим заранее: иначе в jar останется сессия прошлого запроса.
+refresh_session() {
+	rm -f "$CK" "$CK_HEADER"
+	get_session || return 1
+	apply_session
+}
+
+rm -f "$CK" "$CK_HEADER"
+get_session || { err "SesTokInfo не получен с http://$GW"; exit 1; }
+apply_session
 
 sms_list_body() {
 	printf '<?xml version="1.0" encoding="UTF-8"?><request><PageIndex>%s</PageIndex><ReadCount>50</ReadCount><BoxType>1</BoxType><SortType>0</SortType><Ascending>0</Ascending><UnreadPreferred>0</UnreadPreferred></request>' "$1"
@@ -143,21 +284,26 @@ collect_page_ids() {
 }
 
 # Перелистывает sms-list (страницы по 50, максимум 20) и на каждой странице
-# зовёт $1 (без аргументов; ответ лежит в глобальном RESP).
+# зовёт $1 (без аргументов; ответ лежит в глобальном RESP). Считает сообщения
+# в глобальный MSG_TOTAL.
 fetch_pages() {
-	local page=1
+	local page=1 n _c
 	RESP=""
+	MSG_TOTAL=0
 	while [ "$page" -le 20 ]; do
 		RESP=$(http_post "http://$GW/api/sms/sms-list" "$(sms_list_body "$page")") || return 1
 		if [ -z "$RESP" ]; then
-			echo "ERROR: модем не ответил на sms-list (страница $page)" >&2
+			err "модем не ответил на sms-list (страница $page)"
 			return 1
 		fi
 		if is_error "$RESP"; then
 			login_hint "$RESP"
-			echo "ERROR: sms-list (страница $page): $RESP" >&2
+			_c=$(err_code "$RESP")
+			err "sms-list: ошибка ${_c:-неизвестна}"
 			return 1
 		fi
+		n=$(printf '%s' "$RESP" | grep -o '<Message>' | wc -l | tr -d ' ')
+		MSG_TOTAL=$((MSG_TOTAL + n))
 		case "$RESP" in
 		*'<Message>'*) ;;
 		*) return 0 ;;   # пустая страница — сообщений больше нет
@@ -172,53 +318,66 @@ fetch_pages() {
 
 list_sms() {
 	fetch_pages page_messages || return 1
+	ok "найдено SMS: $MSG_TOTAL"
+}
+
+# Удалить одно сообщение (POST /api/sms/delete-sms). Массовый delete-sms-list
+# на этой прошивке отвечает 125003, поэтому delete_all ходит по одному индексу,
+# как веб-интерфейс модема. Токен одноразовый — сессия обновляется перед каждым
+# удалением; при 125003 повторяем со свежей сессией.
+RETRY_SMS=3
+send_delete() {
+	local id=$1 body resp attempt _c
+	body=$(printf '<?xml version="1.0" encoding="UTF-8"?><request><Index>%s</Index></request>' "$id")
+	refresh_session || { err "не удалось обновить сессию перед удалением $id"; return 1; }
+	attempt=0
+	while :; do
+		resp=$(http_post "http://$GW/api/sms/delete-sms" "$body")
+		if [ -n "$resp" ] && ! is_error "$resp"; then
+			return 0
+		fi
+		case "$resp" in
+		*'125003'*)
+			attempt=$((attempt + 1))
+			if [ "$attempt" -lt "$RETRY_SMS" ]; then
+				warn "delete-sms ($id): 125003 — повтор со свежей сессией ($attempt/$RETRY_SMS)"
+				refresh_session || return 1
+				sleep 1
+				continue
+			fi
+			login_hint "$resp"
+			err "delete-sms ($id): ошибка 125003 после $RETRY_SMS попыток"
+			return 1 ;;
+		*)
+			login_hint "$resp"
+			_c=$(err_code "$resp")
+			err "delete-sms ($id): ошибка ${_c:-неизвестна}"
+			return 1 ;;
+		esac
+	done
 }
 
 delete_one() {
-	local body resp
-	body=$(printf '<?xml version="1.0" encoding="UTF-8"?><request><Index>%s</Index></request>' "$TARGET_ID")
-	resp=$(http_post "http://$GW/api/sms/delete-sms" "$body")
-	[ -n "$resp" ] || { echo "ERROR: модем не ответил на delete-sms" >&2; return 1; }
-	if is_error "$resp"; then
-		login_hint "$resp"
-		echo "ERROR: delete-sms ($TARGET_ID): $resp" >&2
-		return 1
-	fi
-	echo "OK: удалено $TARGET_ID"
-}
-
-send_delete_list() {
-	local body resp
-	body=$(printf '<?xml version="1.0" encoding="UTF-8"?><request><Index>%s</Index></request>' "$1")
-	resp=$(http_post "http://$GW/api/sms/delete-sms-list" "$body")
-	[ -n "$resp" ] || { echo "ERROR: модем не ответил на delete-sms-list" >&2; return 1; }
-	if is_error "$resp"; then
-		login_hint "$resp"
-		echo "ERROR: delete-sms-list: $resp" >&2
-		return 1
+	if send_delete "$TARGET_ID"; then
+		ok "удалено: $TARGET_ID"
 	fi
 }
 
 delete_all() {
-	local ids id chunk n total
+	local ids id removed
 	PAGE_IDS=""
 	fetch_pages collect_page_ids || return 1
 	ids=$(printf '%s' "$PAGE_IDS" | tr ' ' '\n' | sed '/^$/d' | sort -n -u | tr '\n' ' ')
-	[ -n "$ids" ] || { echo "OK: нечего удалять"; return 0; }
-	# Часть прошивок режет длинный список индексов — бьём по 20 за запрос.
-	chunk=""; n=0; total=0
+	[ -n "$ids" ] || { ok "нечего удалять"; return 0; }
+	removed=0
 	for id in $ids; do
-		chunk="${chunk}${id},"
-		n=$((n + 1)); total=$((total + 1))
-		if [ "$n" -ge 20 ]; then
-			send_delete_list "${chunk%,}" || return 1
-			chunk=""; n=0
+		if ! send_delete "$id"; then
+			err "стоп на индексе $id (удалено до этого: $removed)"
+			return 1
 		fi
+		removed=$((removed + 1))
 	done
-	if [ -n "$chunk" ]; then
-		send_delete_list "${chunk%,}" || return 1
-	fi
-	echo "OK: удалено SMS: $total"
+	ok "удалено SMS: $removed"
 }
 
 case "$ACTION" in
