@@ -13,7 +13,8 @@
 #   - <SesInfo> может содержать готовый Cookie-заголовок ("SessionID=...") —
 #     префикс не дублируем, иначе модем отвечает 125002;
 #   - токен одноразовый/быстро протухает — сессия обновляется перед каждым
-#     изменяющим запросом (refresh_session);
+#     изменяющим запросом (refresh_session), а 125002/125003 повторяются со
+#     свежей сессией: токен может перебить другой клиент (например, LBS);
 #   - изменяющие запросы требуют Origin/Referer/User-Agent как у веб-интерфейса,
 #     иначе модем отвечает 125003;
 #   - массовый delete-sms-list не поддерживается (125003) — удаляем по одному;
@@ -24,8 +25,9 @@
 #   <request><Username>admin</Username><Password>base64(md5(пароль))</Password></request>
 # — сессия SesTokInfo при этом получается обычным образом.
 #
-# Вывод list совместим с SmsHelper.parseResponse() (text-mode формат +CMGL:),
-# чтобы Java-слой приложения не менялся.
+# Вывод list — формат +CMGL:, совместимый с SmsHelper.parseResponse(). Тело
+# сообщения передаётся в base64 с явным маркером, поэтому переводы строк и
+# XML-сущности не теряются; SmsHelper декодирует его только по маркеру.
 set -u
 
 DIR=$(cd "$(dirname "$0")" && pwd)
@@ -61,99 +63,76 @@ UA_BROWSER="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Gecko/20100101 Firefox/128
 say "==== sms-hilink.sh: действие=$ACTION${TARGET_ID:+ индекс=$TARGET_ID}"
 
 # ---------------------------------------------------------------------------
-# HTTP-клиент. curl есть в Android (/system/bin/curl); wget (toybox) — запасной.
+# HTTP-клиент. HiLink Web API требует Cookie, CSRF-токен, Origin/Referer и
+# POST-тело, поэтому нужен именно curl. wget из toybox (Android 11) умеет
+# только GET -O и не понимает --header/--post-data: тихо ломаться он не должен.
 # HDR_COOKIE/HDR_TOKEN заполняются ниже, после получения сессии; функции
 # читают их в момент вызова. Тело ответа отдаётся ТОЛЬКО на stdout (его забирает
-# $(...) — иначе RESP был бы засорён логами). Код возврата curl/wget сохраняется.
+# $(...) — иначе RESP был бы засорён логами). Код возврата curl сохраняется.
 # ---------------------------------------------------------------------------
-if command -v curl >/dev/null 2>&1; then
-	# SesTokInfo: сохраняем Set-Cookie (-c) и заголовки ответа (-D).
-	http_session() {
-		local _r _o
-		# Сессию создаём с теми же Origin/Referer/UA, что и веб-интерфейс.
-		# Origin берём из URL: на момент пробы шлюз ещё неизвестен.
-		_o=$(printf '%s' "$1" | sed -n 's|\(http://[^/]*\).*|\1|p')
-		_r=$(curl -s --max-time 5 -D "$CK_HEADER" -c "$CK" \
-			-H "Origin: $_o" \
-			-H "Referer: $_o/html/index.html" \
-			-H "User-Agent: $UA_BROWSER" \
-			"$1"); _rc=$?
-		printf '%s' "$_r"
-		return $_rc
-	}
-	# Остальные запросы: COOKIE_MODE выбирает, чем слать сессию — cookie-файлом
-	# (-b, Set-Cookie c модема) или ручным заголовком из <SesInfo> тела.
-	http_get() {
-		local _r
-		if [ "$COOKIE_MODE" = jar ]; then
-			_r=$(curl -s --max-time 10 -b "$CK" -H "$HDR_TOKEN" \
-				-H "Origin: http://$GW" \
-				-H "Referer: http://$GW/html/smsinbox.html" \
-				-H "User-Agent: $UA_BROWSER" "$1"); _rc=$?
-		else
-			_r=$(curl -s --max-time 10 -H "$HDR_COOKIE" -H "$HDR_TOKEN" \
-				-H "Origin: http://$GW" \
-				-H "Referer: http://$GW/html/smsinbox.html" \
-				-H "User-Agent: $UA_BROWSER" "$1"); _rc=$?
-		fi
-		printf '%s' "$_r"
-		return $_rc
-	}
-	http_post() {
-		local _r
-		# Заголовки ровно как у веб-интерфейса модема (эталон из DevTools):
-		# Origin + Referer на страницу SMS. Без них модем режет изменяющие
-		# запросы (delete-sms и т.п.) ошибкой 125003, хотя sms-list проходит.
-		if [ "$COOKIE_MODE" = jar ]; then
-			_r=$(curl -s --max-time 10 -X POST -b "$CK" -H "$HDR_TOKEN" \
-				-H "Origin: http://$GW" \
-				-H "Referer: http://$GW/html/smsinbox.html" \
-				-H "User-Agent: $UA_BROWSER" \
-				-H "X-Requested-With: XMLHttpRequest" \
-				-H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
-				--data "$2" "$1"); _rc=$?
-		else
-			_r=$(curl -s --max-time 10 -X POST -H "$HDR_COOKIE" -H "$HDR_TOKEN" \
-				-H "Origin: http://$GW" \
-				-H "Referer: http://$GW/html/smsinbox.html" \
-				-H "User-Agent: $UA_BROWSER" \
-				-H "X-Requested-With: XMLHttpRequest" \
-				-H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
-				--data "$2" "$1"); _rc=$?
-		fi
-		printf '%s' "$_r"
-		return $_rc
-	}
-else
-	http_session() {
-		local _r
-		_r=$(wget -q -O - "$1"); _rc=$?
-		printf '%s' "$_r"
-		return $_rc
-	}
-	http_get() {
-		local _r
-		_r=$(wget -q -O - --header "$HDR_COOKIE" --header "$HDR_TOKEN" \
-			--header "Origin: http://$GW" \
-			--header "Referer: http://$GW/html/smsinbox.html" \
-			--header "User-Agent: $UA_BROWSER" "$1"); _rc=$?
-		printf '%s' "$_r"
-		return $_rc
-	}
-	http_post() {
-		local _r
-		_r=$(wget -q -O - \
-			--header "$HDR_COOKIE" --header "$HDR_TOKEN" \
-			--header "Origin: http://$GW" \
-			--header "Referer: http://$GW/html/smsinbox.html" \
-			--header "User-Agent: $UA_BROWSER" \
-			--header "X-Requested-With: XMLHttpRequest" \
-			--header "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
-			--post-data "$2" "$1"); _rc=$?
-		printf '%s' "$_r"
-		return $_rc
-	}
+if ! command -v curl >/dev/null 2>&1; then
+	err "для HiLink нужен curl: wget из toybox не умеет заголовки и POST"
+	err "установи curl или используй прошивку/систему с /system/bin/curl"
+	exit 1
 fi
+
+# SesTokInfo: сохраняем Set-Cookie (-c) и заголовки ответа (-D).
+http_session() {
+	local _r _o
+	# Сессию создаём с теми же Origin/Referer/UA, что и веб-интерфейс.
+	# Origin берём из URL: на момент пробы шлюз ещё неизвестен.
+	_o=$(printf '%s' "$1" | sed -n 's|\(http://[^/]*\).*|\1|p')
+	_r=$(curl -s --max-time 5 -D "$CK_HEADER" -c "$CK" \
+		-H "Origin: $_o" \
+		-H "Referer: $_o/html/index.html" \
+		-H "User-Agent: $UA_BROWSER" \
+		"$1"); _rc=$?
+	printf '%s' "$_r"
+	return $_rc
+}
+# Остальные запросы: COOKIE_MODE выбирает, чем слать сессию — cookie-файлом
+# (-b, Set-Cookie c модема) или ручным заголовком из <SesInfo> тела.
+http_get() {
+	local _r
+	if [ "$COOKIE_MODE" = jar ]; then
+		_r=$(curl -s --max-time 10 -b "$CK" -H "$HDR_TOKEN" \
+			-H "Origin: http://$GW" \
+			-H "Referer: http://$GW/html/smsinbox.html" \
+			-H "User-Agent: $UA_BROWSER" "$1"); _rc=$?
+	else
+		_r=$(curl -s --max-time 10 -H "$HDR_COOKIE" -H "$HDR_TOKEN" \
+			-H "Origin: http://$GW" \
+			-H "Referer: http://$GW/html/smsinbox.html" \
+			-H "User-Agent: $UA_BROWSER" "$1"); _rc=$?
+	fi
+	printf '%s' "$_r"
+	return $_rc
+}
+http_post() {
+	local _r
+	# Заголовки ровно как у веб-интерфейса модема (эталон из DevTools):
+	# Origin + Referer на страницу SMS. Без них модем режет изменяющие
+	# запросы (delete-sms и т.п.) ошибкой 125003, хотя sms-list проходит.
+	if [ "$COOKIE_MODE" = jar ]; then
+		_r=$(curl -s --max-time 10 -X POST -b "$CK" -H "$HDR_TOKEN" \
+			-H "Origin: http://$GW" \
+			-H "Referer: http://$GW/html/smsinbox.html" \
+			-H "User-Agent: $UA_BROWSER" \
+			-H "X-Requested-With: XMLHttpRequest" \
+			-H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+			--data "$2" "$1"); _rc=$?
+	else
+		_r=$(curl -s --max-time 10 -X POST -H "$HDR_COOKIE" -H "$HDR_TOKEN" \
+			-H "Origin: http://$GW" \
+			-H "Referer: http://$GW/html/smsinbox.html" \
+			-H "User-Agent: $UA_BROWSER" \
+			-H "X-Requested-With: XMLHttpRequest" \
+			-H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+			--data "$2" "$1"); _rc=$?
+	fi
+	printf '%s' "$_r"
+	return $_rc
+}
 
 is_error() { printf '%s' "$1" | grep -q '<error>'; }
 
@@ -164,14 +143,16 @@ login_hint() {
 
 # Шлюз модема: настоящий сохранил wwan-up.sh в state/system-uplink (поле 4 —
 # GW), запасные — типовые адреса HiLink-роутеров. Проверяем живым ответом
-# SesTokInfo, а не пингом: часть прошивок режет ICMP.
+# SesTokInfo, а не пингом: часть прошивок режет ICMP. 192.168.1.1 пробуем
+# последним: это ещё и штатный шлюз Huawei E8278, но на некоторых головах
+# этот адрес занят локальной точкой доступа, и запрос к ней был бы лишним.
 find_gw() {
 	local gw
 	gw=$(awk '{print $4}' "$DIR/state/system-uplink" 2>/dev/null | tr -d '\r')
 	if [ -n "$gw" ] && [ -n "$(http_session "http://$gw/api/webserver/SesTokInfo" 2>/dev/null)" ]; then
 		echo "$gw"; return 0
 	fi
-	for gw in 192.168.1.1 192.168.0.1 192.168.8.1; do
+	for gw in 192.168.0.1 192.168.8.1 192.168.1.1; do
 		if [ -n "$(http_session "http://$gw/api/webserver/SesTokInfo" 2>/dev/null)" ]; then
 			echo "$gw"; return 0
 		fi
@@ -181,7 +162,7 @@ find_gw() {
 
 GW=$(find_gw) || {
 	err "не найден веб-интерфейс HiLink-модема"
-	err "проверь: модем поднят (wwan-up.sh), есть маршрут до шлюза, curl/wget отвечает на http://<gw>/api/webserver/SesTokInfo"
+	err "проверь: модем поднят (wwan-up.sh), есть маршрут до шлюза, curl отвечает на http://<gw>/api/webserver/SesTokInfo"
 	exit 1
 }
 ok "шлюз: $GW"
@@ -238,25 +219,62 @@ sms_list_body() {
 	printf '<?xml version="1.0" encoding="UTF-8"?><request><PageIndex>%s</PageIndex><ReadCount>50</ReadCount><BoxType>1</BoxType><SortType>0</SortType><Ascending>0</Ascending><UnreadPreferred>0</UnreadPreferred></request>' "$1"
 }
 
-# Печать одной страницы ответа sms-list в формате +CMGL (text-mode):
-#   +CMGL: <index>,<stat>,"<phone>",,"<date>",<len>,text
-#   <content>
+# Печать одной страницы ответа sms-list в формате +CMGL:
+#   +CMGL: <index>,<stat>,"<phone>",,"<date>",<len>,base64
+#   <content-base64>
 # stat: 0 = непрочитано, 1 = прочитано (как в AT-ветке). Читает глобальный RESP.
-# Последнее поле "text" говорит приложению, что тело — обычный текст, а не
-# PDU/hex/base64: угадывать кодировку по виду строки нельзя (код вида
-# 12345678 или ABCD1234 принимался бы за base64/hex и портился).
+# Тело передаётся в base64: переводы строк и XML-сущности (&amp;, &lt;, ...)
+# сохраняются без потерь, а разбор ответа больше не зависит от того, на сколько
+# строк растянулся <Content>. Явный маркер "base64" говорит приложению, что
+# тело закодировано, — угадывать по виду строки (12345678, ABCD1234) нельзя.
 page_messages() {
 	local flat
 	flat=$(printf '%s' "$RESP" | tr -d '\r')
-	printf '%s' "$flat" | sed 's/></>\n</g' | awk '
-		/<Message>/ { inmsg=1; idx=""; phone=""; cdate=""; content=""; stat=""; next }
-		inmsg && /<Index>/   { v=$0; sub(/.*<Index>/,"",v);   sub(/<\/Index>.*/,"",v);   gsub(/^[ \t]+|[ \t]+$/,"",v); idx=v; next }
-		inmsg && /<Phone>/   { v=$0; sub(/.*<Phone>/,"",v);   sub(/<\/Phone>.*/,"",v);   gsub(/^[ \t]+|[ \t]+$/,"",v); phone=v; next }
-		inmsg && /<Date>/    { v=$0; sub(/.*<Date>/,"",v);    sub(/<\/Date>.*/,"",v);    gsub(/^[ \t]+|[ \t]+$/,"",v); cdate=v; next }
-		inmsg && /<Content>/ { v=$0; sub(/.*<Content>/,"",v); sub(/<\/Content>.*/,"",v); content=v; next }
-		inmsg && /<Smstat>/  { v=$0; sub(/.*<Smstat>/,"",v);  sub(/<\/Smstat>.*/,"",v);  gsub(/^[ \t]+|[ \t]+$/,"",v); stat=v; next }
-		/<\/Message>/ { if (idx != "") { printf "+CMGL: %s,%s,\"%s\",,\"%s\",%d,text\n", idx, stat, phone, cdate, length(content); print content } inmsg=0; next }
-	'
+	printf '%s' "$flat" | awk '
+		BEGIN { RS = sprintf("%c", 1) }
+		function field(s, name,    open, closetag, a, b) {
+			open = "<" name ">"
+			a = index(s, open)
+			if (a == 0) return ""
+			a += length(open)
+			closetag = "</" name ">"
+			b = index(substr(s, a), closetag)
+			if (b == 0) return ""
+			return substr(s, a, b - 1)
+		}
+		function decode(s) {
+			gsub(/&lt;/, "<", s)
+			gsub(/&gt;/, ">", s)
+			gsub(/&quot;/, "\042", s)
+			gsub(/&apos;/, "\047", s)
+			gsub(/&amp;/, "\\&", s)
+			return s
+		}
+		{
+			s = $0
+			while ((a = index(s, "<Message>")) > 0) {
+				s = substr(s, a + 9)
+				b = index(s, "</Message>")
+				if (b == 0) break
+				msg = substr(s, 1, b - 1)
+				s = substr(s, b + 10)
+				idx = field(msg, "Index")
+				stat = field(msg, "Smstat")
+				phone = field(msg, "Phone")
+				cdate = field(msg, "Date")
+				content = decode(field(msg, "Content"))
+				# SOH не может встречаться в XML 1.0: используем его как
+				# внутренний маркер перевода строки, чтобы запись осталась
+				# однострочной для while read.
+				gsub(/\n/, sprintf("%c", 1), content)
+				printf "%s\037%s\037%s\037%s\037%s\n", idx, stat, phone, cdate, content
+			}
+		}
+	' | while IFS=$(printf '\037') read -r idx stat phone cdate content; do
+		body=$(printf '%s' "$content" | tr '\001' '\n' | base64 | tr -d '\n')
+		printf '+CMGL: %s,%s,"%s",,"%s",%d,base64\n%s\n' \
+			"$idx" "$stat" "$phone" "$cdate" "${#body}" "$body"
+	done
 }
 
 # Хелпер delete_all: собрать индексы текущей страницы в глобальный PAGE_IDS.
@@ -270,21 +288,34 @@ collect_page_ids() {
 # зовёт $1 (без аргументов; ответ лежит в глобальном RESP). Считает сообщения
 # в глобальный MSG_TOTAL.
 fetch_pages() {
-	local page=1 n _c
+	local page=1 n _c attempt
 	RESP=""
 	MSG_TOTAL=0
 	while [ "$page" -le 20 ]; do
-		RESP=$(http_post "http://$GW/api/sms/sms-list" "$(sms_list_body "$page")") || return 1
-		if [ -z "$RESP" ]; then
-			err "модем не ответил на sms-list (страница $page)"
-			return 1
-		fi
-		if is_error "$RESP"; then
-			login_hint "$RESP"
+		attempt=0
+		while :; do
+			RESP=$(http_post "http://$GW/api/sms/sms-list" "$(sms_list_body "$page")") || return 1
+			if [ -z "$RESP" ]; then
+				err "модем не ответил на sms-list (страница $page)"
+				return 1
+			fi
+			is_error "$RESP" || break
 			_c=$(err_code "$RESP")
+			case "$_c" in
+			125002|125003)
+				attempt=$((attempt + 1))
+				if [ "$attempt" -lt "$RETRY_SMS" ]; then
+					warn "sms-list ($page): $_c — повтор со свежей сессией ($attempt/$RETRY_SMS)"
+					refresh_session || return 1
+					sleep 1
+					continue
+				fi
+				;;
+			esac
+			login_hint "$RESP"
 			err "sms-list: ошибка ${_c:-неизвестна}"
 			return 1
-		fi
+		done
 		n=$(printf '%s' "$RESP" | grep -o '<Message>' | wc -l | tr -d ' ')
 		MSG_TOTAL=$((MSG_TOTAL + n))
 		case "$RESP" in
@@ -307,7 +338,8 @@ list_sms() {
 # Удалить одно сообщение (POST /api/sms/delete-sms). Массовый delete-sms-list
 # на этой прошивке отвечает 125003, поэтому delete_all ходит по одному индексу,
 # как веб-интерфейс модема. Токен одноразовый — сессия обновляется перед каждым
-# удалением; при 125003 повторяем со свежей сессией.
+# удалением; при 125002/125003 (сессию перебил другой клиент, например LBS)
+# повторяем со свежей сессией.
 RETRY_SMS=3
 send_delete() {
 	local id=$1 body resp attempt _c
@@ -319,21 +351,21 @@ send_delete() {
 		if [ -n "$resp" ] && ! is_error "$resp"; then
 			return 0
 		fi
-		case "$resp" in
-		*'125003'*)
+		_c=$(err_code "$resp")
+		case "$_c" in
+		125002|125003)
 			attempt=$((attempt + 1))
 			if [ "$attempt" -lt "$RETRY_SMS" ]; then
-				warn "delete-sms ($id): 125003 — повтор со свежей сессией ($attempt/$RETRY_SMS)"
+				warn "delete-sms ($id): $_c — повтор со свежей сессией ($attempt/$RETRY_SMS)"
 				refresh_session || return 1
 				sleep 1
 				continue
 			fi
 			login_hint "$resp"
-			err "delete-sms ($id): ошибка 125003 после $RETRY_SMS попыток"
+			err "delete-sms ($id): ошибка $_c после $RETRY_SMS попыток"
 			return 1 ;;
 		*)
 			login_hint "$resp"
-			_c=$(err_code "$resp")
 			err "delete-sms ($id): ошибка ${_c:-неизвестна}"
 			return 1 ;;
 		esac
