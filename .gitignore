@@ -1,6 +1,9 @@
 app/build/
 tbox/build/
 app/keystore.jks
+# Готовый APK живёт только в релизах (GitHub Releases и tm.dsr.su/f515), не в git:
+# собранный у себя бинарник не должен попадать в коммиты и PR.
+app/F515UsbWwanApp.apk
 *.idsig
 
 # копии из scripts/, tools/, modules/prebuilt - их кладёт app/build.sh перед линковкой

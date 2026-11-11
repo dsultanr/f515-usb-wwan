@@ -20,7 +20,8 @@
 
 ## Установка
 
-1. Скачай `app/F515UsbWwanApp.apk` из этого репозитория (или собери сам — `app/build.sh`).
+1. Скачай `F515UsbWwanApp.apk` из [последнего релиза](https://github.com/dsultanr/f515-usb-wwan/releases/latest)
+   (или собери сам — `app/build.sh`). В самом репозитории готового APK нет.
 2. Установи на голову — через USB-флешку и штатный установщик Toolbox (`pm install` на
    этой прошивке отключён политикой), либо через EngMode-инъекцию. Подробнее —
    [app/README.md](app/README.md).
