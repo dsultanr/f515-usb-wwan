@@ -4,7 +4,8 @@ with tempfile.TemporaryDirectory() as d:
  master,slave=pty.openpty(); port=os.ttyname(slave); alias=d+'/alias'; os.symlink(port,alias)
  # Android's sh supports read -t; use bash as its host equivalent for the SMS test.
  shim=pathlib.Path(d)/'bin';shim.mkdir();(shim/'sh').write_text('#!/bin/bash\nexec /bin/bash "$@"\n');(shim/'sh').chmod(0o755)
- env=dict(os.environ, WWAN_AT_LOCK_DIR=d+'/locks', AT_READ_SECONDS='1', PATH=str(shim)+':'+os.environ['PATH']); seen=[]; done=False
+ # WWAN_LOG points to a missing dir: sms.sh must survive an unwritable log under set -e.
+ env=dict(os.environ, WWAN_AT_LOCK_DIR=d+'/locks', WWAN_LOG=d+'/no-such-dir/wwan.log', AT_READ_SECONDS='1', PATH=str(shim)+':'+os.environ['PATH']); seen=[]; done=False
  def modem():
   buf=b''
   while not done:

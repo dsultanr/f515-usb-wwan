@@ -8,11 +8,14 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 # Логи, как в wwan-up.sh: на экран приложения (stdout скрипта Keeper отдаёт
 # построчно в окно) и в общий файл /data/local/tmp/wwan.log.
 LOG=${WWAN_LOG:-/data/local/tmp/wwan.log}
-say()  { echo "$*"; echo "$(date '+%F %T') $*" >>"$LOG" 2>/dev/null; }
+# Запись в файл необязательна: под set -e неудачный >>"$LOG" (нет каталога,
+# только чтение) иначе завершил бы весь скрипт. 2>/dev/null — снаружи { },
+# чтобы глушить и ошибку открытия самого файла.
+say()  { echo "$*"; { echo "$(date '+%F %T') $*" >>"$LOG"; } 2>/dev/null || true; }
 ok()   { say "   [ ok ] $*"; }
 warn() { say "   [warn] $*"; }
 # Ошибка — в stderr (у Keeper 2>&1, так что тоже попадает в окно) и в файл.
-err()  { echo "   [FAIL] $*" >&2; echo "$(date '+%F %T')   [FAIL] $*" >>"$LOG" 2>/dev/null; }
+err()  { echo "   [FAIL] $*" >&2; { echo "$(date '+%F %T')   [FAIL] $*" >>"$LOG"; } 2>/dev/null || true; }
 
 # HiLink-модем (E8278, E8372 и родня) SMS отдаёт не AT-портом, а Web API
 # роутера; тип определил wwan-up.sh и сохранил в state/mode — переключаем
