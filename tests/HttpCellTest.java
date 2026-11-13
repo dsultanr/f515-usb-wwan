@@ -51,6 +51,22 @@ public final class HttpCellTest {
         });
         check(src.scan().sameCell(h), "fallback Huawei endpoint, stable bracket");
         check(paths.get(paths.size()-1).endsWith("current-plmn"), "PLMN after scan");
+        List<String> tokens = new ArrayList<>();
+        HttpCellSource rotating = new HttpCellSource((path, headers) -> {
+            if (path.endsWith("SesTokInfo")) {
+                tokens.add("t" + (tokens.size() + 1));
+                String t = tokens.get(tokens.size() - 1);
+                return "<response><SesInfo>SessionID=" + t + "</SesInfo><TokInfo>" + t + "</TokInfo></response>";
+            }
+            String t = "t" + tokens.size();
+            if (!t.equals(headers.get("__RequestVerificationToken"))
+                    || !("SessionID=" + t).equals(headers.get("Cookie")))
+                return "<error><code>125002</code></error>";
+            if (path.endsWith("current-plmn")) return plmn;
+            if (path.endsWith("status")) return status;
+            return signal;
+        });
+        check(rotating.scan().sameCell(h), "fresh HiLink token before every request");
         HttpCellSource unsupported = new HttpCellSource((p, headers) -> p.endsWith("current-plmn") ? plmn
                 : p.endsWith("status") ? status : "<error><code>100002</code></error>");
         rejects(() -> unsupported.scan(), "Huawei PLMN without cell must not fabricate");

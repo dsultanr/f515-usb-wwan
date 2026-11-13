@@ -1,6 +1,7 @@
 import java.util.*;
 
-/** Interface-bound HTTP only; no default network, redirects, credentials or write requests. */
+/** Interface-bound HTTP only; no default network, redirects, password guessing or write requests.
+ *  Every HiLink request is preceded by a fresh SesTokInfo session/token. */
 final class HttpCellSource {
     interface Get { String get(String path, Map<String,String> headers) throws Exception; }
     static final String ZTE = "/goform/goform_get_cmd_process?isTest=false&multi_data=1&cmd=cell_id,lac_code,rmcc,rmnc,network_type,lte_rsrp,rscp,rssi";
@@ -9,23 +10,35 @@ final class HttpCellSource {
     String source = "usb-wwan-http";
     HttpCellSource(Get http) { this.http = http; }
 
-    CellObservation scan() throws Exception {
+    /** Fresh SesTokInfo per request: some firmware invalidates the token after one use. */
+    private Map<String,String> hilinkSession() throws Exception {
         Map<String,String> headers = new HashMap<>();
         try {
-            Map<String,String> session = HttpCellParser.xml(http.get("/api/webserver/SesTokInfo", headers));
+            Map<String,String> fields = HttpCellParser.xml(
+                    http.get("/api/webserver/SesTokInfo", new HashMap<>()));
             for (String key : new String[]{"SesInfo", "TokInfo"}) {
-                String value = session.get(key);
+                String value = fields.get(key);
                 if (value != null && !value.isEmpty()) {
-                    if (value.length() > 1024 || !value.matches("[\\x20-\\x7E]+")) throw new IllegalArgumentException("http-session");
+                    if (value.length() > 1024 || !value.matches("[\\x20-\\x7E]+"))
+                        throw new IllegalArgumentException("http-session");
                     headers.put(key.equals("SesInfo") ? "Cookie" : "__RequestVerificationToken", value);
                 }
             }
         } catch (Exception e) {
             if ("http-auth-required".equals(e.getMessage())) throw e;
+            headers.clear();
         }
+        return headers;
+    }
+
+    private String hilinkGet(String path) throws Exception {
+        return http.get(path, hilinkSession());
+    }
+
+    CellObservation scan() throws Exception {
         String plmn = "";
         Map<String,String> fields;
-        try { plmn = http.get("/api/net/current-plmn", headers); fields = HttpCellParser.xml(plmn); }
+        try { plmn = hilinkGet("/api/net/current-plmn"); fields = HttpCellParser.xml(plmn); }
         catch (Exception e) {
             if ("http-auth-required".equals(e.getMessage())) throw e;
             fields = Collections.emptyMap();
@@ -38,25 +51,25 @@ final class HttpCellSource {
         source = "usb-wwan-huawei-http";
         String statusPath = "/api/monitoring/status", status;
         try {
-            status = http.get(statusPath, headers);
+            status = hilinkGet(statusPath);
             HttpCellParser.huaweiRadio(HttpCellParser.xml(status));
         } catch (Exception e) {
             if (!"http-unsupported".equals(e.getMessage())) throw e;
-            statusPath = "/api/monitor/status"; status = http.get(statusPath, headers);
+            statusPath = "/api/monitor/status"; status = hilinkGet(statusPath);
         }
         for (String path : SIGNALS) {
             String sig;
             try {
-                sig = http.get(path, headers);
+                sig = hilinkGet(path);
                 if (!HttpCellParser.xml(sig).containsKey("cell_id")) continue;
             } catch (Exception e) {
                 if ("http-unsupported".equals(e.getMessage())) continue;
                 throw e;
             }
             CellObservation before = HttpCellParser.huawei(plmn, status, sig);
-            String afterSignal = http.get(path, headers);
-            String afterStatus = http.get(statusPath, headers);
-            String afterPlmn = http.get("/api/net/current-plmn", headers);
+            String afterSignal = hilinkGet(path);
+            String afterStatus = hilinkGet(statusPath);
+            String afterPlmn = hilinkGet("/api/net/current-plmn");
             return HttpCellParser.stable(before, HttpCellParser.huawei(afterPlmn, afterStatus, afterSignal));
         }
         throw new IllegalArgumentException("http-cell-unsupported");

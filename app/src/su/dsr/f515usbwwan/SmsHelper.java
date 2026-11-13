@@ -1,6 +1,7 @@
 package su.dsr.f515usbwwan;
 
 import android.content.Context;
+import android.util.Base64;
 
 import java.nio.charset.Charset;
 import java.util.ArrayList;
@@ -93,6 +94,13 @@ public class SmsHelper {
             if (line.startsWith("+CMGL:")) {
                 String header = line.substring(6).trim();
                 String[] parts = header.split(",");
+                // Седьмое поле ставит HiLink-ветка (sms-hilink.sh): "base64" —
+                // тело закодировано в base64 (UTF-8), "text" — обычный текст.
+                // Только по явному маркеру, иначе кодировку не угадываем.
+                String marker = parts.length >= 7
+                        ? parts[6].trim().replace("\"", "") : "";
+                boolean plainText = "text".equals(marker);
+                boolean base64Text = "base64".equals(marker);
                 int lastIndex = -1;
                 boolean lastUnread = false;
                 if (parts.length >= 2) {
@@ -105,24 +113,37 @@ public class SmsHelper {
                     }
                 }
 
-                // Ищем следующую непустую строку (тело PDU или текст)
+                // HiLink печатает тело сразу после заголовка, даже пустое;
+                // в AT-режиме пустые строки — разделители.
                 i++;
-                while (i < lines.length && lines[i].trim().isEmpty()) {
-                    i++;
+                if (!plainText && !base64Text) {
+                    while (i < lines.length && lines[i].trim().isEmpty()) {
+                        i++;
+                    }
                 }
 
                 if (i < lines.length) {
                     String pduLine = lines[i].trim();
-                    if (!pduLine.equals("OK") && !pduLine.startsWith("+CMGL:")) {
+                    boolean nextHeader = !plainText && !base64Text
+                            && (pduLine.equals("OK") || pduLine.startsWith("+CMGL:"));
+                    if (!nextHeader) {
                         SmsMessage msg = null;
-                        if (isHex(pduLine) && pduLine.length() >= 20) {
+                        if (!plainText && !base64Text && isHex(pduLine) && pduLine.length() >= 20) {
                             msg = decodePdu(lastIndex, pduLine, lastUnread);
                         }
                         if (msg == null) {
-                            // Fallback для Text-mode
+                            // Fallback для Text-mode и HiLink base64
                             String sender = parts.length >= 3 ? parts[2].replace("\"", "").trim() : "Неизвестный";
                             String ts = parts.length >= 5 ? parts[4].replace("\"", "").trim() : "";
-                            msg = new SmsMessage(lastIndex, sender, ts, decodeIfHexUcs2(pduLine), lastUnread);
+                            String text;
+                            if (plainText) {
+                                text = pduLine;
+                            } else if (base64Text) {
+                                text = decodeBase64Text(pduLine);
+                            } else {
+                                text = decodeIfHexUcs2(pduLine);
+                            }
+                            msg = new SmsMessage(lastIndex, sender, ts, text, lastUnread);
                         }
                         if (msg != null && !msg.text.isEmpty() && !containsIndex(result, msg.index, msg.text)) {
                             result.add(msg);
@@ -303,6 +324,21 @@ public class SmsHelper {
             bitPos += 7;
         }
         return sb.toString();
+    }
+
+    /**
+     * Декодирует тело, помеченное HiLink-веткой как base64. Тело всегда UTF-8:
+     * скрипт кодирует исходный текст без потерь (переводы строк, XML-сущности).
+     * При ошибке возвращает строку как есть, чтобы не терять сообщение.
+     */
+    private static String decodeBase64Text(String s) {
+        if (s == null || s.isEmpty()) return "";
+        try {
+            byte[] raw = Base64.decode(s, Base64.DEFAULT);
+            return new String(raw, Charset.forName("UTF-8"));
+        } catch (Exception e) {
+            return s;
+        }
     }
 
     private static String decodeIfHexUcs2(String s) {
